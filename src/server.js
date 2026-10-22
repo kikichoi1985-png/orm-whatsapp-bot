@@ -27,6 +27,8 @@ app.use(express.json({ limit: '2mb', verify: (req, _res, buf) => { req.rawBody =
 
 app.get('/', (_req, res) => res.send(bot ? "O'rm 영수증 비서 실행 중" : `O'rm 영수증 비서 — 설정 대기 (${missing.join(', ')})`));
 
+app.get('/healthz', (_req, res) => res.send('ok'));
+
 // Meta 웹훅 확인
 app.get('/webhook', (req, res) => {
   if (req.query['hub.mode'] === 'subscribe' && env.WHATSAPP_VERIFY_TOKEN && req.query['hub.verify_token'] === env.WHATSAPP_VERIFY_TOKEN) {
