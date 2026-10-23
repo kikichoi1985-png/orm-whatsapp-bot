@@ -9,6 +9,8 @@ const TOOL = {
     properties: {
       readable: { type: 'boolean', description: '영수증이며 날짜·거래처·총액을 모두 읽을 수 있으면 true' },
       question: { type: 'string', description: 'readable=false일 때 올린 사람에게 보낼 짧고 구체적인 한국어 질문' },
+      doc_type: { type: 'string', enum: ['receipt', 'invoice', 'credit_note', 'payment_slip', 'statement', 'other'], description: '증빙 종류. 송금·입금 확인 화면은 payment_slip' },
+      related_no: { type: 'string', description: 'Credit Note·수정 인보이스가 가리키는 원래 인보이스 번호, 없으면 빈 문자열' },
       date: { type: 'string', description: 'YYYY-MM-DD' },
       vendor: { type: 'string' },
       receipt_no: { type: 'string', description: '영수증/인보이스 번호, 없으면 빈 문자열' },
@@ -43,6 +45,8 @@ export function buildPrompt({ sender, message, answers = [], vendors = [], today
 - category: Food(식재료·식품), Drink(음료·주류·커피/차 원료), Other(소모품·포장재·교통·비품 등 식음료가 아닌 것), Unclear(판독 불가 또는 무엇인지 모름).
 - 영수증이 아니거나 날짜·거래처·총액 중 하나라도 읽을 수 없으면 readable=false, question에 질문을 쓴다. 올린 사람의 추가 답변·정정이 있으면 반드시 그대로 반영한다(답변이 우선).
 - 연도가 없으면 오늘(${today}) 기준으로 가장 최근 날짜로 본다.
+- Credit Note는 doc_type=credit_note, total은 차감 금액(양수), related_no에 원래 인보이스 번호.
+- 가격표·견적·상품 사진처럼 거래 증빙이 아니면 doc_type=other, 송금·입금 확인 화면은 doc_type=payment_slip으로 표시하고 notes에 무엇인지 쓴다.
 
 알려진 거래처(기준정보): ${vendorList}
 올린 사람: ${sender || '(이름 없음)'}

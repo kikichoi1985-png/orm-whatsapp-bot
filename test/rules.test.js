@@ -1,58 +1,84 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, toHKD, findPrepaidRow, isPrepaidText, isPaidText, detailsText, prepaidRef, paidRef } from '../src/rules.js';
+import {
+  classify, toHKD, prepaidRef, paidRef, prepaidNameFromRef, isOpenPrepaidRef, findPrepaidRow, detailsText, nextNo,
+  fallbackReceiptNo, findDuplicate, ymdNumber, hkdOverride,
+} from '../src/rules.js';
+import { parseDailyQuote } from '../src/fx.js';
 
-const vendors = [{ name: 'Classic Fine Foods', type: 'Food' }, { name: 'Swire Coca-Cola HK', type: 'Drink' }];
+const V = [{ name: 'Classic Fine Foods', aliases: ['CFF'], type: 'Food' }];
 
-test('규칙1: 품목이 모두 Food → Purchase_Food', () => {
-  const r = classify([{ name: 'Butter', amount: 100, category: 'Food' }], 'Any', vendors);
-  assert.equal(r.category, 'Purchase_Food');
+test('D10 분류: 명확·불명확·혼합·동률·금액 누락', () => {
+  assert.equal(classify([{ name: 'Butter', amount: 10, category: 'Food' }], 'x', V).category, 'Purchase_Food');
+  assert.equal(classify([{ name: 'Wine', amount: 10, category: 'Drink' }], 'x', V).category, 'Purchase_Drink');
+  assert.equal(classify([{ name: 'Taxi', amount: 10, category: 'Other' }], 'x', V).category, 'Expenses');
+  // 불명확 → 거래처 유형 (별칭으로도 찾음)
+  const u = classify([{ name: '??', category: 'Unclear' }], 'CFF', V);
+  assert.equal(u.category, 'Purchase_Food'); assert.equal(u.needsReview, false);
+  // 혼합 → 금액 큰 쪽
+  const m = classify([{ name: 'a', amount: 300, category: 'Food' }, { name: 'b', amount: 500, category: 'Drink' }], 'x', V);
+  assert.equal(m.category, 'Purchase_Drink'); assert.equal(m.needsReview, false);
+  // 동률 → 확인
+  assert.equal(classify([{ name: 'a', amount: 5, category: 'Food' }, { name: 'b', amount: 5, category: 'Other' }], 'x', V).needsReview, true);
+  // 혼합인데 금액을 못 읽음 → 확인
+  assert.equal(classify([{ name: 'a', category: 'Food' }, { name: 'b', amount: 5, category: 'Drink' }], 'x', V).needsReview, true);
+  // 모두 불명확 + 모르는 거래처 → 확인
+  assert.equal(classify([{ name: '?', category: 'Unclear' }], 'Unknown', V).category, '');
 });
-test('규칙1: 식음료 외 품목 → Expenses', () => {
-  assert.equal(classify([{ name: '장갑', amount: 50, category: 'Other' }], 'Taobao', vendors).category, 'Expenses');
+
+test('D12·D13 환산: 셋째 자리 반올림, CNY 외 통화는 환산 불가', () => {
+  assert.deepEqual(toHKD(818.06, 'HKD '), { rate: 1, hkd: 818.06 });
+  assert.equal(toHKD(664.35, 'CNY', 1.10238).hkd, 732.37);
+  assert.equal(toHKD(100, 'USD', 7.8).hkd, null);
 });
-test('규칙2: 품목 불명확 → 거래처 기준 (CFF=Food)', () => {
-  const r = classify([{ name: '??', amount: 80, category: 'Unclear' }], 'CLASSIC FINE FOODS (HK) LTD', vendors);
-  assert.equal(r.category, 'Purchase_Food');
-  assert.match(r.reason, /규칙/);
-});
-test('규칙2: 품목·거래처 모두 불명 → 직접 선택', () => {
-  const r = classify([{ name: '??', category: 'Unclear' }], 'Unknown Shop', vendors);
-  assert.equal(r.category, ''); assert.equal(r.needsReview, true);
-});
-test('규칙3: 혼합이면 금액 큰 쪽', () => {
-  const items = [
-    { name: 'Butter', amount: 336, category: 'Food' }, { name: 'Cream', amount: 255, category: 'Food' },
-    { name: 'San Pellegrino', amount: 186, category: 'Drink' }, { name: 'Wine', amount: 500, category: 'Drink' },
-  ];
-  assert.equal(classify(items, 'X', vendors).category, 'Purchase_Drink'); // Drink 686 > Food 591
-});
-test('규칙3: 동률은 확인 필요', () => {
-  const r = classify([{ name: 'a', amount: 10, category: 'Food' }, { name: 'b', amount: 10, category: 'Drink' }], 'X', vendors);
-  assert.equal(r.needsReview, true);
-});
-test('B03: CNY 환산 반올림', () => {
-  assert.deepEqual(toHKD(276.6, 'CNY', 1.09), { rate: 1.09, hkd: 301.49 });
-  assert.deepEqual(toHKD(1075, 'HKD', 1.09), { rate: 1, hkd: 1075 });
-  assert.deepEqual(toHKD(10, 'USD', 1.09), { rate: null, hkd: null });
-});
-test('B01: 선지불/입금완료 인식', () => {
-  assert.ok(isPrepaidText('선지불 — 급하게 샀어요')); assert.ok(isPrepaidText('선 지불'));
-  assert.ok(isPaidText('INV-208431 입금 완료')); assert.ok(!isPaidText('입금 예정'));
-  assert.equal(prepaidRef('Mina'), 'Mina 선지불, 추후 입금 해야함');
-  assert.equal(paidRef('Mina'), 'Mina 선지불, 추후 입금완료');
-});
-test('입금완료: 영수증번호/ID로 미입금 선지불 행 찾기', () => {
+
+test('D11 REF 문구와 입금완료 대상 찾기', () => {
+  assert.equal(prepaidRef('한상훈 매니져님'), '한상훈 매니져님 선지불, 추후 입금 해야함');
+  assert.equal(paidRef('한상훈 매니져님'), '한상훈 매니져님 대표 선지불, 추후 입금완료');
+  assert.equal(prepaidNameFromRef('한상훈 매니져님 선지불, 추후 입금 해야함'), '한상훈 매니져님');
+  assert.ok(isOpenPrepaidRef('Mina 선지불, 추후 입금 해야함'));
+  assert.ok(!isOpenPrepaidRef('최준우 대표 선지불, 추후 입금 완료'));
   const rows = [
-    { id: 'R261020-AAA', receiptNo: 'INV-208431', ref: 'Mina 선지불, 추후 입금 해야함' },
-    { id: 'R261021-BBB', receiptNo: '', ref: 'Jun 선지불, 추후 입금 해야함' },
-    { id: 'R261021-CCC', receiptNo: 'X1', ref: '' },
+    { no: '#20260401', receiptNo: 'Basic_20260401', ref: 'Mina 선지불, 추후 입금 해야함' },
+    { no: '#20260402', receiptNo: 'INV-208431', ref: 'Mina 선지불, 추후 입금 해야함' },
+    { no: '#20260403', receiptNo: 'X1', ref: '' },
   ];
-  assert.equal(findPrepaidRow(rows, 'inv-208431 입금완료').hit.id, 'R261020-AAA');
-  assert.equal(findPrepaidRow(rows, '#R261021-BBB 입금완료했어요').hit.id, 'R261021-BBB');
-  const miss = findPrepaidRow(rows, '입금완료');
-  assert.equal(miss.hit, null); assert.equal(miss.open.length, 2);
+  assert.equal(findPrepaidRow(rows, 'inv-208431 입금완료').hit.no, '#20260402');
+  assert.equal(findPrepaidRow(rows, '#20260401 입금완료').hit.no, '#20260401');
+  assert.equal(findPrepaidRow(rows, 'X1 입금완료').hit, null);
 });
-test('상세내역은 품목과 수량만', () => {
+
+test('D07 매입관리번호: 시트별 형식, 양식 예시(Sample) 무시', () => {
+  const exp = ['No.', null, '#1', '#20260402', '#20260403', 'Sample : 회계기간', 'No.', '#1', '#6'];
+  assert.equal(nextNo('Expenses', exp, 2026), '#20260404');
+  assert.equal(nextNo('Expenses', exp, 2027), '#20270001');
+  assert.equal(nextNo('Purchase_Food', ['No.', '#290', '#292', '#291', 'Sample', '#6'], 2026), '#293');
+  assert.equal(nextNo('Purchase_Drink', ['No.'], 2026), '#1');
+  assert.equal(fallbackReceiptNo('#20260404'), 'Basic_20260404');
+});
+
+test('D08 중복 / D09 수정본 판정', () => {
+  const rows = [
+    { tab: 'Purchase_Food', no: '#5', receiptNo: '401379001', date: 20260714, vendor: 'Classic Fine Foods', amount: 1075 },
+    { tab: 'Expenses (SG&A)', no: '#20260400', receiptNo: 'Basic_20260400', date: 20260918, vendor: 'monolab', amount: 105 },
+  ];
+  assert.equal(findDuplicate(rows, { vendor: 'CLASSIC FINE FOODS (HK) LTD', receiptNo: '#401379001', date: '2026-07-14', amount: 1075 }).kind, 'duplicate');
+  assert.equal(findDuplicate(rows, { vendor: 'Classic Fine Foods', receiptNo: '401379001', date: '2026-07-15', amount: 990 }).kind, 'revision');
+  assert.equal(findDuplicate(rows, { vendor: 'Monolab', receiptNo: '', date: '2026-09-18', amount: 105 }).kind, 'possible_duplicate');
+  assert.equal(findDuplicate(rows, { vendor: 'Monolab', receiptNo: '', date: '2026-09-19', amount: 105 }), null);
+});
+
+test('상세내역·날짜 형식·HKD 직접 입력', () => {
   assert.equal(detailsText([{ name: 'Butter', qty: '2' }, { name: 'Cream' }]), 'Butter x2, Cream');
+  assert.equal(ymdNumber('2026-10-20'), 20261020);
+  assert.equal(hkdOverride('HKD 1,234.5 로 해줘'), 1234.5);
+  assert.equal(hkdOverride('환산 732.37'), 732.37);
+  assert.equal(hkdOverride('총액 1200'), null);
+});
+
+test('네이버 일별 시세 파싱', () => {
+  const html = `<tr class="up"><td class="date">2026.10.22</td>
+    <td class="num">193.21</td><td class="num"><img> 0.31</td></tr>
+    <tr><td class="date">2026.10.21</td><td class="num">1,192.90</td></tr>`;
+  assert.deepEqual(parseDailyQuote(html), [{ date: '2026-10-22', rate: 193.21 }, { date: '2026-10-21', rate: 1192.9 }]);
 });

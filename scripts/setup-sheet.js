@@ -1,4 +1,4 @@
-// 장부 스프레드시트에 Ledger / Vendors / Config 탭과 머리글을 만든다. (서버도 시작할 때 자동으로 실행함)
+// 장부 스프레드시트에 장부 3탭과 Staff / Vendors / Config / AI_Log 탭과 머리글을 만든다. (서버도 시작할 때 자동으로 실행함)
 // 사용: GOOGLE_SHEET_ID=... GOOGLE_SERVICE_ACCOUNT_JSON='{...}' npm run setup-sheet
 import { createSheetsStore } from '../src/sheets.js';
 

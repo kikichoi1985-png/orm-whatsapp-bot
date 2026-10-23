@@ -1,7 +1,7 @@
 // WhatsApp Cloud API 클라이언트 (Graph API)
 import crypto from 'node:crypto';
 
-export function createWhatsApp({ token, phoneNumberId, version = 'v23.0', fetchImpl = fetch }) {
+export function createWhatsApp({ token, phoneNumberId, version = 'v25.0', fetchImpl = fetch }) {
   const base = `https://graph.facebook.com/${version}`;
   const auth = { Authorization: `Bearer ${token}` };
 
@@ -11,7 +11,12 @@ export function createWhatsApp({ token, phoneNumberId, version = 'v23.0', fetchI
       headers: { ...auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ messaging_product: 'whatsapp', ...payload }),
     });
-    if (!res.ok) throw new Error(`WhatsApp 전송 실패 ${res.status}: ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      const err = new Error(`WhatsApp 전송 실패 ${res.status}: ${body}`);
+      try { err.code = JSON.parse(body)?.error?.code; } catch { /* 본문이 JSON이 아님 */ }
+      throw err;
+    }
     return res.json();
   }
   const clip = (s, n) => (String(s).length > n ? String(s).slice(0, n - 1) + '…' : String(s));
@@ -37,6 +42,12 @@ export function createWhatsApp({ token, phoneNumberId, version = 'v23.0', fetchI
         body: { text: clip(body, 1024) },
         action: { button: clip(buttonText, 20), sections: [{ title: '선택', rows: rows.map((r) => ({ id: r.id, title: clip(r.title, 24), description: r.description ? clip(r.description, 72) : undefined })) }] },
       },
+    }),
+
+    /** 승인된 템플릿 메시지 (24시간 대화창 밖에서 먼저 연락할 때) */
+    sendTemplate: (to, name, lang = 'ko', bodyParams = []) => post({
+      to, type: 'template',
+      template: { name, language: { code: lang }, ...(bodyParams.length ? { components: [{ type: 'body', parameters: bodyParams.map((t) => ({ type: 'text', text: String(t) })) }] } : {}) },
     }),
 
     markRead: (messageId) => post({ status: 'read', message_id: messageId }).catch(() => {}),

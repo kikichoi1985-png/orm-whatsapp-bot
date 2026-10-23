@@ -1,119 +1,242 @@
-// 가짜 WhatsApp / Claude / Sheets로 실제 대화 흐름을 끝까지 시뮬레이션
+// 가짜 WhatsApp / Claude / Sheets / 환율로 실제 대화 흐름을 끝까지 시뮬레이션
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { createBot } from '../src/flow.js';
 import { parseWebhook, verifySignature } from '../src/whatsapp.js';
-import crypto from 'node:crypto';
+import { CATEGORIES } from '../src/rules.js';
 
-function harness(extractImpl) {
+const STAFF = '85291110000';   // 한상훈 매니져님 (직원)
+const ACCT = '85292220000';    // 고성찬 (회계)
+
+function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, ledgerSeed = {} } = {}) {
   const sent = [];
-  const ledger = [];
+  const tabs = Object.fromEntries(Object.values(CATEGORIES).map((t) => [t, [['No.'], ...(ledgerSeed[t] || [])]]));
+  const log = [];
+  let windowClosed = failWindow;
   const wa = {
     sendText: async (to, body) => sent.push({ to, kind: 'text', body }),
-    sendButtons: async (to, body, buttons) => sent.push({ to, kind: 'buttons', body, buttons }),
+    sendButtons: async (to, body, buttons) => {
+      if (windowClosed && to === ACCT) { const e = new Error('Re-engagement message'); e.code = 131047; throw e; }
+      sent.push({ to, kind: 'buttons', body, buttons });
+    },
     sendList: async (to, body, _b, rows) => sent.push({ to, kind: 'list', body, rows }),
+    sendTemplate: async (to, name) => sent.push({ to, kind: 'template', name }),
     markRead: () => {},
     downloadMedia: async () => ({ base64: 'AAAA', mimeType: 'image/jpeg' }),
   };
+  const rowsOf = (tab) => tabs[tab].map((r, i) => ({ r, i })).filter(({ r }) => String(r[0]).startsWith('#')).map(({ r, i }) => ({
+    tab, rowNumber: i + 1, no: r[0], file: r[1], receiptNo: r[2], date: r[3], vendor: r[4], currency: r[5], details: r[6], amount: r[7], hkd: r[8], payDate: r[9], account: r[10], ref: r[11] || '',
+  }));
   const sheets = {
-    getVendors: async () => [{ name: 'Classic Fine Foods', type: 'Food' }],
-    getConfig: async () => ({ CNY_HKD: '1.09' }),
-    appendLedger: async (row) => { ledger.push({ ...row }); },
-    listLedger: async () => ledger.map((r, i) => ({ rowNumber: i + 2, id: r.ID, receiptNo: r.영수증번호, ref: r.REF, vendor: r.거래처, hkd: r.HKD, uploader: r.올린사람 })),
-    markPaid: async (rowNumber, { ref, reportedBy }) => { Object.assign(ledger[rowNumber - 2], { REF: ref, 입금보고자: reportedBy }); },
+    getStaff: async () => [
+      { phone: STAFF, name: '한상훈 매니져님', role: '직원' },
+      ...(approvers ? [{ phone: ACCT, name: '고성찬 이사', role: '회계' }] : [{ phone: ACCT, name: '고성찬 이사', role: '직원' }]),
+    ],
+    getVendors: async () => [{ name: 'Classic Fine Foods', aliases: ['CFF'], type: 'Food' }],
+    getConfig: async () => ({ FILE_LABEL: '오름 {year} 매입 인보이스 모음', REF_PREPAID: '{name} 선지불, 추후 입금 해야함', REF_PAID: '{name} 대표 선지불, 추후 입금완료' }),
+    listLedger: async () => Object.keys(tabs).flatMap(rowsOf),
+    columnA: async (tab) => tabs[tab].map((r) => r[0]),
+    insertLedgerRow: async (tab, values) => { tabs[tab].push([...values]); return tabs[tab].length; },
+    updateLedgerRow: async (tab, rowNumber, vals) => { tabs[tab][rowNumber - 1] = [tabs[tab][rowNumber - 1][0], ...vals]; },
+    updateRef: async (tab, rowNumber, ref) => { tabs[tab][rowNumber - 1][11] = ref; },
+    appendLog: async (o) => { log.push(o); },
   };
+  const fx = { cnyToHkd: fxImpl || (async () => ({ rate: 1.10238, source: '네이버 매매기준율 테스트' })) };
   const calls = [];
   const extract = async (args) => { calls.push(args); return extractImpl(args, calls.length); };
-  const bot = createBot({ wa, extract, sheets, allowed: ['85291110000', '85292220000'], log: { warn() {}, error() {} } });
+  const bot = createBot({ wa, extract, sheets, fx, approvalTemplate: 'approval_ping', log: { warn() {}, error() {} } });
   let n = 0;
-  const send = (m) => bot.handle({ id: 'm' + (++n), from: '85291110000', name: 'Mina', type: 'text', ...m });
-  const last = () => sent.at(-1);
-  return { bot, sent, ledger, calls, send, last };
+  const send = (m, from = STAFF) => bot.handle({ id: 'm' + (++n), from, name: 'wa-profile', type: 'text', ...m });
+  const lastTo = (to, kind) => sent.filter((s) => s.to === to && (!kind || s.kind === kind)).at(-1);
+  return { bot, sent, tabs, log, calls, send, lastTo, openWindow: () => { windowClosed = false; } };
 }
 
 const CFF = {
-  readable: true, date: '2026-10-20', vendor: 'CLASSIC FINE FOODS (HK) LTD', receipt_no: 'INV-208431', currency: 'HKD', total: 1075,
-  payment_method: 'VISA', items: [
+  readable: true, doc_type: 'invoice', date: '2026-10-20', vendor: 'CLASSIC FINE FOODS (HK) LTD', receipt_no: 'INV-208431', currency: 'HKD', total: 1075,
+  items: [
     { name: 'Unsalted Butter 1kg', qty: '2', amount: 336, category: 'Food' },
     { name: 'Whipping Cream', qty: '3', amount: 255, category: 'Food' },
-    { name: 'Parmigiano', qty: '1', amount: 298, category: 'Food' },
     { name: 'San Pellegrino', qty: '24', amount: 186, category: 'Drink' },
   ],
 };
+const IMG = { type: 'image', mediaId: 'media1', mimeType: 'image/jpeg' };
 
-test('영수증(선지불) → 후보 → 저장 → 입금완료 REF 갱신', async () => {
-  const h = harness(() => CFF);
-  await h.send({ type: 'image', mediaId: 'media1', mimeType: 'image/jpeg', text: '선지불 급하게 샀어요' });
-  const card = h.last();
-  assert.equal(card.kind, 'buttons');
-  assert.match(card.body, /Purchase_Food/);
-  assert.match(card.body, /HKD 1,075.00/);
-  assert.match(card.body, /Mina 선지불, 추후 입금 해야함/);
+test('직원 영수증(선지불) → 회계 승인 → 장부 저장 → 입금완료 보고 → 회계 확인 → REF 갱신', async () => {
+  const h = harness(() => CFF, { ledgerSeed: { Purchase_Food: [['#292', 'x', 'OLD-1', 20260921, 'Wah Kee', 'HKD', 'Food', 100, 100, '', '', '']] } });
+  await h.send({ ...IMG, text: '선지불 급하게 샀어요' });
 
+  const card = h.lastTo(ACCT, 'buttons');
+  assert.match(card.body, /\[승인 요청\]/);
+  assert.match(card.body, /올린 사람: 한상훈 매니져님/);
+  assert.match(card.body, /시트: Purchase_Food/);
+  assert.match(card.body, /한상훈 매니져님 선지불, 추후 입금 해야함/);
+  assert.match(h.lastTo(STAFF).body, /회계 담당 승인 후 장부에 저장/);
+  assert.equal(h.tabs.Purchase_Food.length, 2, '승인 전에는 저장하지 않음 (D06)');
+
+  // 직원은 승인 못 함
   await h.send({ type: 'interactive', replyId: card.buttons[0].id });
-  assert.equal(h.ledger.length, 1);
-  assert.equal(h.ledger[0].분류, 'Purchase_Food');
-  assert.equal(h.ledger[0].HKD, 1075);
-  assert.equal(h.ledger[0].REF, 'Mina 선지불, 추후 입금 해야함');
-  assert.equal(h.ledger[0].AI대비수정, '없음');
-  assert.match(h.last().body, /입금완료/);
+  assert.match(h.lastTo(STAFF).body, /회계 담당만/);
 
-  // 다른 직원(대표)이 입금 완료 보고 — 이름은 원래 선지불한 사람 기준
-  await h.bot.handle({ id: 'x1', from: '85292220000', name: '대표', type: 'text', text: 'INV-208431 입금완료' });
-  assert.equal(h.ledger[0].REF, 'Mina 선지불, 추후 입금완료');
-  assert.equal(h.ledger[0].입금보고자, '대표');
+  await h.send({ type: 'interactive', replyId: card.buttons[0].id }, ACCT);
+  const row = h.tabs.Purchase_Food.at(-1);
+  assert.equal(row[0], '#293', 'D07 기존 마지막 번호 다음');
+  assert.equal(row[1], `오름 ${new Date().getFullYear()} 매입 인보이스 모음`);
+  assert.deepEqual(row.slice(2, 9), ['INV-208431', 20261020, 'CLASSIC FINE FOODS (HK) LTD', 'HKD', 'Unsalted Butter 1kg x2, Whipping Cream x3, San Pellegrino x24', 1075, 1075]);
+  assert.equal(row[11], '한상훈 매니져님 선지불, 추후 입금 해야함');
+  assert.match(h.lastTo(STAFF).body, /회계 승인 완료 — Purchase_Food #293/);
+  assert.equal(h.log.at(-1).상태, '저장');
+  assert.equal(h.log.at(-1).승인자, '고성찬 이사');
+
+  await h.send({ text: '#293 입금완료' });
+  const pc = h.lastTo(ACCT, 'buttons');
+  assert.match(pc.body, /입금완료 확인/);
+  assert.equal(row[11], '한상훈 매니져님 선지불, 추후 입금 해야함', '회계 확인 전에는 그대로');
+  await h.send({ type: 'interactive', replyId: pc.buttons[0].id }, ACCT);
+  assert.equal(h.tabs.Purchase_Food.at(-1)[11], '한상훈 매니져님 대표 선지불, 추후 입금완료');
+  assert.match(h.lastTo(STAFF).body, /반영됐어요/);
 });
 
-test('판독 불가 → 질문 → 답변 반영 → 후보', async () => {
+test('번호 없는 경비 영수증 → Basic_ 번호, Expenses 연도 번호', async () => {
+  const h = harness(() => ({ readable: true, doc_type: 'receipt', date: '2026-10-22', vendor: 'monolab', receipt_no: '', currency: 'HKD', total: 105, items: [{ name: 'Latte', qty: '3', amount: 105, category: 'Other' }] }),
+    { ledgerSeed: { 'Expenses (SG&A)': [['#20260403']] } });
+  await h.send({ ...IMG });
+  const card = h.lastTo(ACCT, 'buttons');
+  assert.match(card.body, /Basic_번호/);
+  await h.send({ type: 'interactive', replyId: card.buttons[0].id }, ACCT);
+  const year = new Date(Date.now() + 8 * 3600e3).getUTCFullYear();
+  const row = h.tabs['Expenses (SG&A)'].at(-1);
+  const expected = year === 2026 ? '#20260404' : `#${year}0001`;
+  assert.equal(row[0], expected);
+  assert.equal(row[2], `Basic_${expected.slice(1)}`);
+  assert.equal(row[11], '');
+});
+
+test('판독 불가 → 올린 사람에게 질문 → 답변 반영 → 승인 요청', async () => {
   const h = harness((args, n) => n === 1
     ? { readable: false, question: '총액이 흐려요. 얼마였나요?', items: [] }
     : { ...CFF, total: Number(args.answers[0].replace(/\D/g, '')) });
-  await h.send({ type: 'image', mediaId: 'm', mimeType: 'image/png', text: '' });
-  assert.match(h.last().body, /총액이 흐려요/);
+  await h.send({ ...IMG, mimeType: 'image/png' });
+  assert.match(h.lastTo(STAFF).body, /총액이 흐려요/);
+  assert.equal(h.lastTo(ACCT), undefined, '질문 단계에서는 회계에 보내지 않음');
   await h.send({ text: '1200' });
   assert.deepEqual(h.calls[1].answers, ['1200']);
-  assert.equal(h.last().kind, 'buttons');
-  assert.match(h.last().body, /HKD 1,200.00/);
+  assert.match(h.lastTo(ACCT, 'buttons').body, /HKD 1,200.00/);
 });
 
-test('정정 답장 → 재판독, 분류 직접 변경 → 저장 시 수정 항목 기록', async () => {
-  const h = harness((args) => args.answers.length ? { ...CFF, total: 999 } : CFF);
-  await h.send({ type: 'image', mediaId: 'm', mimeType: 'image/jpeg', text: '' });
-  const id = h.last().buttons[0].id.split(':')[1];
-  await h.send({ text: '총액 999' });
-  assert.match(h.last().body, /HKD 999.00/);
-  await h.send({ type: 'interactive', replyId: `cat:${id}` });
-  assert.equal(h.last().kind, 'list');
-  await h.send({ type: 'interactive', replyId: `set:${id}:Expenses` });
-  assert.match(h.last().body, /Expenses \(SG&A\)/);
-  await h.send({ type: 'interactive', replyId: `save:${id}` });
-  assert.equal(h.ledger[0].분류, 'Expenses (SG&A)');
-  assert.equal(h.ledger[0].REF, '');
-  assert.match(h.ledger[0].AI대비수정, /원금액/);
-  assert.match(h.ledger[0].AI대비수정, /분류/);
+test('CNY: 네이버 환율 실패 → 승인 막힘 → 회계가 HKD 직접 입력 → 옛 카드 무효 → 새 카드로 저장', async () => {
+  const h = harness(() => ({ readable: true, doc_type: 'receipt', date: '2026-06-07', vendor: 'Railway12306', receipt_no: 'E123', currency: 'CNY', total: 664.35, items: [{ name: 'HK-Guangzhou train', qty: '3', amount: 664.35, category: 'Other' }] }),
+    { fxImpl: async () => { throw new Error('down'); } });
+  await h.send({ ...IMG });
+  const v1 = h.lastTo(ACCT, 'buttons');
+  assert.match(v1.body, /네이버 환율 조회 실패/);
+  await h.send({ type: 'interactive', replyId: v1.buttons[0].id }, ACCT);
+  assert.match(h.lastTo(ACCT, 'text').body, /HKD 금액을 정할 수 없어요/);
+
+  await h.send({ text: 'HKD 732.37' }, ACCT);
+  const v2 = h.lastTo(ACCT, 'buttons');
+  assert.match(v2.body, /\(수정 1\)/);
+  assert.match(v2.body, /CNY 664.35 → HKD 732.37/);
+  await h.send({ type: 'interactive', replyId: v1.buttons[0].id }, ACCT);
+  assert.match(h.lastTo(ACCT).body, /새 카드/);
+  await h.send({ type: 'interactive', replyId: v2.buttons[0].id }, ACCT);
+  const row = h.tabs['Expenses (SG&A)'].at(-1);
+  assert.deepEqual([row[5], row[7], row[8]], ['CNY', 664.35, 732.37]);
+  assert.match(h.log.at(-1).AI대비수정, /HKD/);
 });
 
-test('CNY 영수증 환산 + "선지불"을 사진보다 먼저 보낸 경우', async () => {
-  const h = harness(() => ({ readable: true, date: '2026-10-18', vendor: '淘宝 Taobao', receipt_no: '3984475120021', currency: 'CNY', total: 276.6,
-    items: [{ name: '一次性丁腈手套', qty: '5', amount: 145, category: 'Other' }, { name: '厨房纸巾', qty: '10', amount: 89.9, category: 'Other' }] }));
-  await h.send({ text: '선지불' });
-  assert.match(h.last().body, /선지불로 표시/);
-  await h.send({ type: 'image', mediaId: 'm', mimeType: 'image/jpeg', text: '' });
-  assert.match(h.last().body, /CNY 276.60 → HKD 301.49 \(@1.09/);
-  assert.match(h.last().body, /Expenses/);
-  assert.match(h.last().body, /선지불, 추후 입금 해야함/);
+test('CNY: 네이버 환율로 자동 환산', async () => {
+  const h = harness(() => ({ readable: true, date: '2026-06-07', vendor: 'Railway12306', receipt_no: 'E1', currency: 'CNY', total: 664.35, items: [{ name: 't', amount: 664.35, category: 'Other' }] }));
+  await h.send({ ...IMG });
+  assert.match(h.lastTo(ACCT, 'buttons').body, /CNY 664.35 → HKD 732.37[\s\S]*네이버 매매기준율/);
 });
 
-test('허용 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
+test('D08 같은 증빙 재업로드 → 중복 표시 / D09 수정본 → 기존 행 수정', async () => {
+  const seed = { Purchase_Food: [['#10', 'f', 'INV-208431', 20261020, 'Classic Fine Foods', 'HKD', 'old', 1075, 1075, '', '', 'R']] };
+  const dup = harness(() => CFF, { ledgerSeed: seed });
+  await dup.send({ ...IMG });
+  const c = dup.lastTo(ACCT, 'buttons');
+  assert.match(c.body, /이미 장부에 있는 증빙/);
+  assert.equal(c.buttons[0].title, '그래도 저장');
+
+  const rev = harness(() => ({ ...CFF, total: 990 }), { ledgerSeed: JSON.parse(JSON.stringify(seed)) });
+  await rev.send({ ...IMG });
+  const c2 = rev.lastTo(ACCT, 'buttons');
+  assert.equal(c2.buttons[0].title, '기존 행 수정');
+  await rev.send({ type: 'interactive', replyId: c2.buttons[0].id }, ACCT);
+  assert.equal(rev.tabs.Purchase_Food.length, 2, '새 행을 만들지 않음');
+  assert.equal(rev.tabs.Purchase_Food[1][0], '#10');
+  assert.equal(rev.tabs.Purchase_Food[1][7], 990);
+  assert.equal(rev.tabs.Purchase_Food[1][11], 'R', '기존 REF 유지');
+  assert.equal(rev.log.at(-1).상태, '기존 행 수정');
+});
+
+test('D09 Credit Note → 원본 행 금액 차감', async () => {
+  const seed = { Purchase_Food: [['#10', 'f', '401379001', 20260714, 'Classic Fine Foods', 'HKD', 'Butter x2', 1075, 1075, '', '', '']] };
+  const h = harness(() => ({ readable: true, doc_type: 'credit_note', related_no: '401379001', date: '2026-07-16', vendor: 'Classic Fine Foods', receipt_no: 'CN-77', currency: 'HKD', total: 168, items: [{ name: 'Butter', qty: '1', amount: 168, category: 'Food' }] }),
+    { ledgerSeed: seed });
+  await h.send({ ...IMG });
+  const c = h.lastTo(ACCT, 'buttons');
+  assert.match(c.body, /Credit Note → 승인하면 원본 Purchase_Food #10/);
+  await h.send({ type: 'interactive', replyId: c.buttons[0].id }, ACCT);
+  const r = h.tabs.Purchase_Food[1];
+  assert.deepEqual([r[0], r[7], r[8]], ['#10', 907, 907]);
+  assert.match(r[6], /Credit Note CN-77 -168.00/);
+});
+
+test('분류 변경 목록 → 반려', async () => {
+  const h = harness(() => CFF);
+  await h.send({ ...IMG });
+  const c = h.lastTo(ACCT, 'buttons');
+  await h.send({ type: 'interactive', replyId: c.buttons[1].id }, ACCT);
+  const list = h.lastTo(ACCT, 'list');
+  await h.send({ type: 'interactive', replyId: list.rows.find((r) => r.title === 'Expenses (SG&A)').id }, ACCT);
+  const c2 = h.lastTo(ACCT, 'buttons');
+  assert.match(c2.body, /시트: Expenses \(SG&A\)/);
+  await h.send({ type: 'interactive', replyId: c2.buttons[2].id }, ACCT);
+  assert.match(h.lastTo(STAFF).body, /반려했어요/);
+  assert.equal(h.tabs['Expenses (SG&A)'].length, 1);
+  assert.equal(h.log.at(-1).상태, '반려');
+});
+
+test('24시간 창이 닫힌 승인자 → 템플릿 알림 → 승인자가 말을 걸면 대기 카드 전달', async () => {
+  const h = harness(() => CFF, { failWindow: true });
+  await h.send({ ...IMG });
+  assert.equal(h.lastTo(ACCT).kind, 'template');
+  assert.match(h.lastTo(STAFF).body, /회계 담당에게 바로 알리지 못했어요/);
+  h.openWindow();
+  await h.send({ text: '안녕' }, ACCT);
+  assert.match(h.lastTo(ACCT, 'buttons').body, /\[승인 요청\]/);
+});
+
+test('승인자가 없으면 올린 사람이 직접 승인', async () => {
+  const h = harness(() => CFF, { approvers: false });
+  await h.send({ ...IMG });
+  const c = h.lastTo(STAFF, 'buttons');
+  assert.ok(c);
+  await h.send({ type: 'interactive', replyId: c.buttons[0].id });
+  assert.equal(h.tabs.Purchase_Food.at(-1)[0], '#1');
+});
+
+test('거래 증빙이 아님 → 확인 → "등록"이면 진행', async () => {
+  const h = harness((args) => (args.answers.length ? CFF : { readable: true, doc_type: 'other', notes: 'CFF 가격표', items: [] }));
+  await h.send({ ...IMG });
+  assert.match(h.lastTo(STAFF).body, /거래 증빙.*아닌 것 같아요/);
+  assert.equal(h.lastTo(ACCT), undefined);
+  await h.send({ text: '등록' });
+  assert.match(h.lastTo(ACCT, 'buttons').body, /\[승인 요청\]/);
+});
+
+test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
   const h = harness(() => CFF);
   await h.bot.handle({ id: 'z', from: '85299999999', name: '?', type: 'text', text: '도움말' });
   assert.equal(h.sent.length, 0);
-  await h.send({ type: 'image', mediaId: 'm', mimeType: 'image/jpeg', text: '' });
+  await h.send({ ...IMG });
   const count = h.sent.length;
-  await h.bot.handle({ id: 'm1', from: '85291110000', type: 'image', mediaId: 'm', mimeType: 'image/jpeg' }); // 같은 id 재전송
+  await h.bot.handle({ id: 'm1', from: STAFF, ...IMG });
   assert.equal(h.sent.length, count);
   await h.send({ type: 'document', mediaId: 'd', mimeType: 'application/vnd.ms-excel', text: '' });
-  assert.match(h.last().body, /PDF/);
+  assert.match(h.lastTo(STAFF).body, /PDF/);
 });
 
 test('웹훅 파싱과 서명 검증', () => {
@@ -121,11 +244,11 @@ test('웹훅 파싱과 서명 검증', () => {
     contacts: [{ wa_id: '852911', profile: { name: 'Mina' } }],
     messages: [
       { id: 'a', from: '852911', timestamp: '1', type: 'image', image: { id: 'IMG', mime_type: 'image/jpeg', caption: '선지불' } },
-      { id: 'b', from: '852911', timestamp: '1', type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: 'save:R1', title: '저장' } } },
+      { id: 'b', from: '852911', timestamp: '1', type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: 'ok:R1:1', title: '승인·저장' } } },
     ] } }] }] };
   const [a, b] = parseWebhook(body);
   assert.equal(a.mediaId, 'IMG'); assert.equal(a.text, '선지불'); assert.equal(a.name, 'Mina');
-  assert.equal(b.replyId, 'save:R1');
+  assert.equal(b.replyId, 'ok:R1:1');
   const raw = Buffer.from(JSON.stringify(body));
   const sig = 'sha256=' + crypto.createHmac('sha256', 's3cret').update(raw).digest('hex');
   assert.ok(verifySignature(raw, sig, 's3cret'));
