@@ -109,3 +109,10 @@ test('문서번호 비교: 장부 접두어 허용', async () => {
   assert.ok(!sameDocNo('#401379001', '401379002'));
   assert.ok(!sameDocNo('#12', '2'));
 });
+
+test('판독 응답 파싱: 도구 호출 / 본문 JSON', async () => {
+  const { parseResult } = await import('../src/extract.js');
+  assert.equal(parseResult({ content: [{ type: 'tool_use', name: 'record_receipt', input: { readable: true, items: [] } }] }).readable, true);
+  assert.equal(parseResult({ content: [{ type: 'text', text: '결과: {"readable":false,"items":[]}' }] }).readable, false);
+  assert.throws(() => parseResult({ content: [{ type: 'text', text: '모르겠어요' }] }));
+});
