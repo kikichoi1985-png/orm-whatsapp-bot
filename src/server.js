@@ -60,6 +60,7 @@ app.post('/webhook', (req, res) => {
   for (const e of req.body?.entry || []) for (const c of e.changes || []) for (const s of c.value?.statuses || []) {
     const err = (s.errors || []).map((x) => `${x.code} ${x.title}${x.error_data?.details ? ' — ' + x.error_data.details : ''}`).join('; ');
     console[s.status === 'failed' ? 'error' : 'log'](`[발송상태] ${s.recipient_id} ${s.status}${err ? ' | ' + err : ''}`);
+    bot?.handleStatus(s);
   }
   for (const msg of parseWebhook(req.body)) {
     console.log(`[수신] ${msg.from} ${msg.type}${msg.text ? ' "' + String(msg.text).slice(0, 40) + '"' : ''}`);

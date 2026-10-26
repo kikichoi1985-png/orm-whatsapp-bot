@@ -297,3 +297,12 @@ test('웹훅 파싱과 서명 검증', () => {
   assert.ok(verifySignature(raw, sig, 's3cret'));
   assert.ok(!verifySignature(raw, sig, 'wrong'));
 });
+
+test('발송 결과 131047(24시간 창 닫힘) → 승인자가 아무 말이나 하면 밀린 카드 전달', async () => {
+  const h = harness(() => CFF);
+  await h.send({ ...IMG });
+  const before = h.sent.filter((s) => s.to === ACCT && s.kind === 'buttons').length;
+  h.bot.handleStatus({ status: 'failed', recipient_id: ACCT, errors: [{ code: 131047 }] });
+  await h.send({ text: '안녕' }, ACCT);
+  assert.equal(h.sent.filter((s) => s.to === ACCT && s.kind === 'buttons').length, before + 1);
+});

@@ -489,5 +489,14 @@ export function createBot({
     return next;
   }
 
-  return { handle, restore, _drafts: drafts, _paid: paidReqs };
+  /** 발송 결과 웹훅: 24시간 창이 닫혀 실패(131047)한 승인자는 다음에 말을 걸 때 밀린 카드를 보여 준다 */
+  function handleStatus(s) {
+    if (s?.status !== 'failed') return;
+    if ((s.errors || []).some((e) => Number(e.code) === 131047)) {
+      needsNotify.add(String(s.recipient_id));
+      if (approvalTemplate) wa.sendTemplate(String(s.recipient_id), approvalTemplate, templateLang).catch(() => {});
+    }
+  }
+
+  return { handle, handleStatus, restore, _drafts: drafts, _paid: paidReqs };
 }
