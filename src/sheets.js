@@ -12,7 +12,7 @@ export const LEDGER_HEADERS = [
 ];
 export const LOG_HEADERS = [
   '처리ID', '상태', '시트', 'No.', '영수증번호', '업체', '통화', '금액', 'HKD', '분류 근거', '올린사람', '올린사람번호',
-  '승인자', '원메시지ID', '미디어ID', '메시지·정정', 'AI 원본', 'AI대비수정', '환율 근거', '생성시각', '처리시각',
+  '승인자', '원메시지ID', '미디어ID', '메시지·정정', 'AI 원본', 'AI대비수정', '환율 근거', '생성시각', '처리시각', '구매 목적',
 ];
 const LEDGER_TABS = Object.values(CATEGORIES);
 const q = (tab) => `'${tab.replace(/'/g, "''")}'`;
@@ -59,6 +59,8 @@ export function createSheetsStore({ sheetId, serviceAccountJson, cacheMs = 60_00
     await loadMeta();
     const want = { ...Object.fromEntries(LEDGER_TABS.map((t) => [t, [LEDGER_HEADERS]])), ...TAB_DEFAULTS };
     const add = Object.keys(want).filter((t) => !(t in tabIds));
+    // AI_Log 머리글은 코드가 관리 — 열이 추가돼도 기존 탭 머리글을 맞춘다
+    if ('AI_Log' in tabIds) await api.values.update({ spreadsheetId: sheetId, range: 'AI_Log!A1', valueInputOption: 'RAW', requestBody: { values: [LOG_HEADERS] } });
     if (!add.length) return [];
     await api.batchUpdate({ spreadsheetId: sheetId, requestBody: { requests: add.map((title) => ({ addSheet: { properties: { title, gridProperties: { frozenRowCount: 1 } } } })) } });
     for (const t of add) await api.values.update({ spreadsheetId: sheetId, range: `${q(t)}!A1`, valueInputOption: 'RAW', requestBody: { values: want[t] } });
@@ -148,7 +150,7 @@ export function createSheetsStore({ sheetId, serviceAccountJson, cacheMs = 60_00
         const v = obj[h];
         return v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : v;
       })];
-      await api.values.append({ spreadsheetId: sheetId, range: 'AI_Log!A:U', valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values } });
+      await api.values.append({ spreadsheetId: sheetId, range: 'AI_Log!A:V', valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values } });
     },
 
     // ---- 승인 대기 보관 (서버 재시작 대비) ----

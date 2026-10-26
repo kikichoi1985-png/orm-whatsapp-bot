@@ -3,7 +3,7 @@
 // D10 분류 / D11 선지불 REF / D12·D13 CNY 환산 / D15 상세내역·판독 불가 질문 / D23 담당자 알림
 import {
   CATEGORIES, classify, toHKD, isPrepaidText, isPaidText, prepaidRef, paidRef, prepaidNameFromRef, findPrepaidRow,
-  detailsText, fmtMoney, round2, ymdNumber, nextNo, fallbackReceiptNo, findDuplicate, normalizeNo, hkdOverride,
+  detailsText, fmtMoney, round2, ymdNumber, nextNo, fallbackReceiptNo, findDuplicate, findPaidRow, normalizeNo, sameDocNo, hkdOverride,
   hkYear, hkStamp, DEFAULT_REF,
 } from './rules.js';
 import { SUPPORTED_MIME } from './extract.js';
@@ -108,12 +108,25 @@ export function createBot({
     d.ai = out;
     d.docType = d.forceReceipt ? 'receipt' : (out.doc_type || 'receipt');
     if (out.readable === false) { d.state = 'asking'; return; }
-    if (['other', 'statement', 'payment_slip'].includes(d.docType)) { d.state = 'notdoc'; return; }
+    if (['other', 'statement', 'payment_slip'].includes(d.docType)) {
+      d.state = 'notdoc';
+      d.slip = { amount: Number(out.total) || 0, date: out.date || '', vendor: out.vendor || '' };
+      if (['payment_slip', 'statement'].includes(d.docType)) {
+        try {
+          const rows = await sheets.listLedger();
+          const nos = String(out.related_no || '').split(/[,\s]+/).map(normalizeNo).filter(Boolean);
+          // 장부 영수증번호에 "INV #" 같은 접두어가 붙어 있어도 찾도록 포함 비교
+          const hasNo = (r) => { const rn = normalizeNo(r.receiptNo); return nos.some((n) => n.length >= 5 && rn.includes(n)); };
+          d.slipRow = (nos.length && rows.find(hasNo)) || (d.slip.amount ? findPaidRow(rows, d.slip) : null);
+        } catch { d.slipRow = null; }
+      }
+      return;
+    }
     const items = Array.isArray(out.items) ? out.items : [];
     Object.assign(d, {
       date: out.date || '', vendor: out.vendor || '', receiptNo: out.receipt_no || '', relatedNo: out.related_no || '',
       items, details: detailsText(items), currency: String(out.currency || 'HKD').trim().toUpperCase(),
-      amount: Number(out.total) || 0, notes: out.notes || '',
+      amount: Number(out.total) || 0, notes: out.notes || '', purpose: out.purpose || '',
     });
     const fxr = await rateFor(d, cfg);
     const conv = toHKD(d.amount, d.currency, fxr.rate);
@@ -126,7 +139,7 @@ export function createBot({
     try {
       const rows = await sheets.listLedger();
       if (d.docType === 'credit_note') {
-        const orig = d.relatedNo && rows.find((r) => normalizeNo(r.receiptNo) === normalizeNo(d.relatedNo));
+        const orig = d.relatedNo && rows.find((r) => sameDocNo(r.receiptNo, d.relatedNo));
         d.dup = orig ? { kind: 'credit_note', row: orig } : { kind: 'credit_note', row: null };
       } else {
         d.dup = findDuplicate(rows, d);
@@ -143,7 +156,7 @@ export function createBot({
       d.dup?.kind === 'credit_note' && d.dup.row ? `Credit Note → 승인하면 원본 ${d.dup.row.tab} ${d.dup.row.no} 행 금액을 차감해 수정해요` : null,
       d.dup?.kind === 'credit_note' && !d.dup.row ? `Credit Note인데 원본 인보이스(${d.relatedNo || '번호 없음'})를 장부에서 못 찾았어요` : null,
       d.dupError ? '장부 중복 확인을 못 했어요' : null,
-      !d.receiptNo ? '영수증 번호 없음 → 저장 시 Basic_번호로 입력' : null,
+      !d.receiptNo ? `영수증 번호 없음 → 저장 시 내부 번호(${d.category === 'Expenses' ? 'Basic_번호' : d.category === 'Purchase_Drink' ? 'YYYY PURD (번호)' : 'YYYY PURF (번호)'})로 입력` : null,
     ].filter(Boolean);
     if (!d.firstSnapshot) d.firstSnapshot = snapshot(d);
     d.state = 'pending';
@@ -163,6 +176,7 @@ export function createBot({
       `날짜: ${d.date || '-'}`,
       `업체: ${d.vendor || '-'}`,
       `내역: ${d.details || '-'}`,
+      d.purpose ? `목적: ${d.purpose}` : null,
       `금액: ${moneyLine(d)}`,
       d.prepaid ? `REF: ${prepaidRef(d.name, d.refTpl)}` : null,
       d.flags?.length ? `\n확인 필요\n${d.flags.map((f) => `- ${f}`).join('\n')}` : null,
@@ -208,10 +222,22 @@ export function createBot({
       return persist();
     }
     if (d.state === 'notdoc') {
-      const what = { other: '거래 증빙(영수증·인보이스)이 아닌 것', statement: '거래명세서(statement)', payment_slip: '송금·입금 확인 화면' }[d.docType];
-      await wa.sendText(d.phone, `${what} 같아요${d.ai?.notes ? ` (${d.ai.notes})` : ''}.\n${d.docType === 'payment_slip'
-        ? '선지불 입금 완료증이면 "번호 입금완료"라고 보내 주세요 (예: "#20260404 입금완료").'
-        : '장부에 넣어야 하는 영수증이면 "등록"이라고 답장해 주세요. 아니면 "취소".'}`);
+      const what = { other: '거래 증빙(영수증·인보이스)이 아닌 것', statement: '거래명세서(statement)', payment_slip: '송금 확인·카드 결제 알림' }[d.docType];
+      let next;
+      if (d.docType === 'statement' && d.slipRow) {
+        const r = d.slipRow;
+        next = `이 statement의 인보이스는 이미 장부에 있어요: ${r.tab} ${r.no} (${r.vendor}, HKD ${fmtMoney(r.hkd)}). statement는 새 매입으로 넣지 않아요.\n그래도 새로 넣어야 하면 "등록"이라고 보내 주세요.`;
+      } else if (d.docType === 'statement') {
+        next = 'statement는 새 매입으로 넣지 않는 게 원칙이에요. 각 인보이스를 보내 주시거나, 이 statement 자체로 기장해야 하면 "등록"이라고 보내 주세요.';
+      } else if (d.docType === 'payment_slip' && d.slipRow) {
+        const r = d.slipRow;
+        next = `장부에 이미 같은 금액 건이 있어요: ${r.tab} ${r.no} (${r.vendor}, HKD ${fmtMoney(r.hkd)}). 그 건의 지급 확인이면 새로 넣지 않아도 돼요.\n선지불 입금 완료라면 "${r.no} 입금완료", 다른 지출이라 새로 넣어야 하면 "등록"이라고 보내 주세요.`;
+      } else if (d.docType === 'payment_slip') {
+        next = '영수증·인보이스가 따로 있으면 그걸 보내 주세요. 이 송금 확인만으로 장부에 넣으려면 "등록", 선지불 입금 완료라면 "번호 입금완료"라고 보내 주세요.';
+      } else {
+        next = '장부에 넣어야 하는 증빙이면 "등록"이라고 답장해 주세요. 아니면 "취소".';
+      }
+      await wa.sendText(d.phone, `${what} 같아요${d.ai?.notes ? ` (${d.ai.notes})` : ''}.\n${next}`);
       return persist();
     }
     d.v = (d.v || 0) + 1;
@@ -288,7 +314,7 @@ export function createBot({
       }
       const tab = CATEGORIES[d.category];
       const no = nextNo(d.category, await sheets.columnA(tab), year);
-      const row = [no, fileLabel, d.receiptNo || fallbackReceiptNo(no), ymdNumber(d.date), d.vendor, d.currency, d.details, d.amount, d.hkd, '', '', ref];
+      const row = [no, fileLabel, d.receiptNo || fallbackReceiptNo(no, d.category, year), ymdNumber(d.date), d.vendor, d.currency, d.details, d.amount, d.hkd, '', '', ref];
       const rowNumber = await sheets.insertLedgerRow(tab, row);
       return { tab, no, rowNumber, revised: false };
     });
@@ -299,7 +325,7 @@ export function createBot({
       처리ID: d.id, 상태: result.revised ? '기존 행 수정' : '저장', 시트: result.tab, 'No.': result.no, 영수증번호: d.receiptNo, 업체: d.vendor,
       통화: d.currency, 금액: d.amount, HKD: d.hkd, '분류 근거': d.reason, 올린사람: d.name, 올린사람번호: d.phone, 승인자: approverName,
       원메시지ID: d.sourceMessageId, 미디어ID: d.mediaId, '메시지·정정': [d.message, ...d.answers].filter(Boolean).join(' / '),
-      'AI 원본': d.ai, AI대비수정: changed.join(', ') || '없음', '환율 근거': d.rateSource, 생성시각: new Date(d.createdAt + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' '), 처리시각: hkStamp(),
+      'AI 원본': d.ai, AI대비수정: changed.join(', ') || '없음', '환율 근거': d.rateSource, '구매 목적': d.purpose, 생성시각: new Date(d.createdAt + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' '), 처리시각: hkStamp(),
     }).catch((e) => log.warn?.('AI_Log 기록 실패', e.message));
 
     drafts.delete(d.id); media.delete(d.id);
@@ -398,7 +424,11 @@ export function createBot({
     const t = (msg.text || '').trim();
     if (/^(도움말|help|\?|사용법)$/i.test(t)) return wa.sendText(msg.from, isApprover ? `${HELP_APPROVER}\n\n${HELP_STAFF}` : HELP_STAFF);
     if (isApprover && /^(대기|목록|pending)$/i.test(t)) return resendPending(msg.from);
-    if (isPaidText(t)) return handlePaid(msg, who, isApprover);
+    if (isPaidText(t)) {
+      const slip = drafts.get(latest.get(msg.from));
+      if (slip?.state === 'notdoc') { drafts.delete(slip.id); media.delete(slip.id); persist(); } // 송금 확인 사진 → 입금완료로 처리
+      return handlePaid(msg, who, isApprover);
+    }
 
     // 내가 올린 건이 질문·확인 대기 중이면 그 건에 대한 답
     const mine = drafts.get(latest.get(msg.from));

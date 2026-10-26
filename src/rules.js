@@ -35,8 +35,11 @@ export function classify(items = [], vendor, vendors = []) {
   const counts = { Food: 0, Drink: 0, Other: 0 };
   let unclear = 0;
   let missingAmount = false;
+  let meals = 0;
   for (const it of items) {
-    let c = ['Food', 'Drink', 'Other'].includes(it.category) ? it.category : null;
+    // Meal(식당·카페·바에서 사 먹은 것)은 식재료 구매가 아니므로 경비 — 실제 장부 관행(회식·회의 식대 → Expenses)
+    if (it.category === 'Meal') meals++;
+    let c = it.category === 'Meal' ? 'Other' : ['Food', 'Drink', 'Other'].includes(it.category) ? it.category : null;
     if (!c) {
       unclear++;
       if (['Food', 'Drink', 'Other'].includes(vt)) c = vt; else continue;
@@ -57,6 +60,7 @@ export function classify(items = [], vendor, vendors = []) {
     const top = present[0];
     const reason = unclear
       ? `명확한 품목은 모두 ${top}, 불분명한 품목 ${unclear}개는 거래처 유형(${vt}) 적용 [D10-1·2]`
+      : meals ? '식당·카페·바에서 사 먹은 식음료(식대·회식·회의) → 경비 [D10-1]'
       : `품목이 모두 ${top === 'Other' ? '식음료 외' : top} [D10-1]`;
     return { category: ITEM_TO_CAT[top], reason, needsReview: false };
   }
@@ -101,6 +105,12 @@ export const isOpenPrepaidRef = (ref) => /선지[불급]/.test(ref || '') && /�
 export const prepaidNameFromRef = (ref) => String(ref || '').split(/\s*선지[불급]/)[0].trim();
 
 export const normalizeNo = (s) => String(s || '').toUpperCase().replace(/[\s#]/g, '');
+/** 장부 표기("INV #HKSO2311039", "Wah Kee #ORM-july")와 문서번호("HKSO2311039")를 같은 번호로 본다 */
+export function sameDocNo(ledgerNo, docNo) {
+  const a = normalizeNo(ledgerNo); const b = normalizeNo(docNo);
+  if (!a || !b) return false;
+  return a === b || (b.length >= 5 && a.endsWith(b)) || (a.length >= 5 && b.endsWith(a));
+}
 const normalizeVendor = (s) => String(s || '').toLowerCase().replace(/\(.*?\)/g, '').replace(/\b(limited|ltd|co|company|hk|hong kong)\b/g, '').replace(/[^a-z0-9가-힣]/g, '');
 
 /** 입금완료 메시지에서 영수증 번호 후보 토큰을 뽑는다. */
@@ -149,8 +159,16 @@ export function nextNo(category, existing = [], year) {
   return `#${(nums.length ? Math.max(...nums) : 0) + 1}`;
 }
 
-/** 공식 번호가 없는 증빙의 영수증번호 (실제 장부 관행: Basic_매입관리번호) */
-export const fallbackReceiptNo = (no) => `Basic_${String(no).replace(/^#/, '')}`;
+/**
+ * 공식 번호가 없는 증빙의 내부 영수증번호 (실제 장부 관행, '자료 - 현황' 4단계 EXP·PURF·PURD 계열)
+ *  Expenses: Basic_20260404 / Purchase_Food: 2026 PURF (293) / Purchase_Drink: 2026 PURD (206)
+ */
+export function fallbackReceiptNo(no, category = 'Expenses', year) {
+  const n = String(no).replace(/^#/, '');
+  if (category === 'Purchase_Food') return `${year} PURF (${n.padStart(3, '0')})`;
+  if (category === 'Purchase_Drink') return `${year} PURD (${n.padStart(3, '0')})`;
+  return `Basic_${n}`;
+}
 
 /**
  * D08 중복 판정 / D09 수정본
@@ -166,15 +184,29 @@ export function findDuplicate(rows, cand) {
   const sameVendor = (r) => !ven || !normalizeVendor(r.vendor) || normalizeVendor(r.vendor) === ven
     || normalizeVendor(r.vendor).includes(ven) || ven.includes(normalizeVendor(r.vendor));
   if (no && !/^BASIC/.test(no)) {
-    const hit = rows.find((r) => normalizeNo(r.receiptNo) === no && sameVendor(r));
+    const hit = rows.find((r) => sameDocNo(r.receiptNo, no) && sameVendor(r));
     if (hit) {
       const same = round2(hit.amount) === amt && (!date || Number(hit.date) === date);
       return { kind: same ? 'duplicate' : 'revision', row: hit };
     }
     return null;
   }
-  const hit = rows.find((r) => date && Number(r.date) === date && round2(r.amount) === amt && sameVendor(r));
+  const hit = rows.find((r) => round2(r.amount) === amt && sameVendor(r) && withinDays(r.date, date, 7));
   return hit ? { kind: 'possible_duplicate', row: hit } : null;
+}
+
+/** ymd 숫자 두 개가 n일 이내인지 (한쪽을 모르면 false) */
+function withinDays(a, b, n) {
+  const toD = (x) => { const s = String(x); return /^\d{8}$/.test(s) ? Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)) : null; };
+  const da = toD(a); const db = toD(b);
+  return da != null && db != null && Math.abs(da - db) <= n * 864e5;
+}
+
+/** 송금 확인·카드 결제 문자: 같은 금액의 기존 장부 행(45일 이내)을 찾는다 → 새 행 대신 지급 증빙으로 연결 */
+export function findPaidRow(rows, { amount, date }) {
+  const amt = round2(amount);
+  const d = ymdNumber(date);
+  return rows.filter((r) => round2(r.hkd) === amt || round2(r.amount) === amt).find((r) => !d || withinDays(r.date, d, 45)) || null;
 }
 
 /** 정정 메시지에서 직접 지정한 HKD 금액 ("HKD 123.45", "환산 123.45") */

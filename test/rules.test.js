@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   classify, toHKD, prepaidRef, paidRef, prepaidNameFromRef, isOpenPrepaidRef, findPrepaidRow, detailsText, nextNo,
-  fallbackReceiptNo, findDuplicate, ymdNumber, hkdOverride,
+  fallbackReceiptNo, findDuplicate, findPaidRow, ymdNumber, hkdOverride,
 } from '../src/rules.js';
 import { parseDailyQuote } from '../src/fx.js';
 
@@ -55,6 +55,9 @@ test('D07 매입관리번호: 시트별 형식, 양식 예시(Sample) 무시', (
   assert.equal(nextNo('Purchase_Food', ['No.', '#290', '#292', '#291', 'Sample', '#6'], 2026), '#293');
   assert.equal(nextNo('Purchase_Drink', ['No.'], 2026), '#1');
   assert.equal(fallbackReceiptNo('#20260404'), 'Basic_20260404');
+  assert.equal(fallbackReceiptNo('#20260404', 'Expenses', 2026), 'Basic_20260404');
+  assert.equal(fallbackReceiptNo('#293', 'Purchase_Food', 2026), '2026 PURF (293)');
+  assert.equal(fallbackReceiptNo('#56', 'Purchase_Drink', 2026), '2026 PURD (056)');
 });
 
 test('D08 중복 / D09 수정본 판정', () => {
@@ -65,7 +68,23 @@ test('D08 중복 / D09 수정본 판정', () => {
   assert.equal(findDuplicate(rows, { vendor: 'CLASSIC FINE FOODS (HK) LTD', receiptNo: '#401379001', date: '2026-07-14', amount: 1075 }).kind, 'duplicate');
   assert.equal(findDuplicate(rows, { vendor: 'Classic Fine Foods', receiptNo: '401379001', date: '2026-07-15', amount: 990 }).kind, 'revision');
   assert.equal(findDuplicate(rows, { vendor: 'Monolab', receiptNo: '', date: '2026-09-18', amount: 105 }).kind, 'possible_duplicate');
-  assert.equal(findDuplicate(rows, { vendor: 'Monolab', receiptNo: '', date: '2026-09-19', amount: 105 }), null);
+  assert.equal(findDuplicate(rows, { vendor: 'Monolab', receiptNo: '', date: '2026-09-23', amount: 105 }).kind, 'possible_duplicate', '7일 이내');
+  assert.equal(findDuplicate(rows, { vendor: 'Monolab', receiptNo: '', date: '2026-09-30', amount: 105 }), null);
+  assert.equal(findDuplicate(rows, { vendor: 'Other shop', receiptNo: '', date: '2026-09-18', amount: 105 }), null);
+});
+
+test('실제 영수증방 사례: 식당·카페·바 식음료는 경비(Meal), 식재료 구매는 Purchase', () => {
+  assert.equal(classify([{ name: 'Americano', amount: 42, category: 'Meal' }], 'Starbucks', V).category, 'Expenses');
+  assert.equal(classify([{ name: 'Lunch', amount: 1529, category: 'Meal' }], 'Chueca', V).category, 'Expenses');
+  assert.match(classify([{ name: 'Lunch', amount: 1, category: 'Meal' }], 'x', V).reason, /경비/);
+  assert.equal(classify([{ name: 'Parmigiano 200g', amount: 78, category: 'Food' }, { name: 'Bag', amount: 1, category: 'Other' }], 'Market Place', V).category, 'Purchase_Food');
+});
+
+test('송금 확인·카드 문자 → 45일 이내 같은 금액 장부 행 찾기', () => {
+  const rows = [{ tab: 'Expenses (SG&A)', no: '#20260368', date: 20260824, amount: 23116, hkd: 23116 }];
+  assert.equal(findPaidRow(rows, { amount: 23116, date: '2026-08-29' }).no, '#20260368');
+  assert.equal(findPaidRow(rows, { amount: 23116, date: '2026-11-29' }), null);
+  assert.equal(findPaidRow(rows, { amount: 999, date: '2026-08-29' }), null);
 });
 
 test('상세내역·날짜 형식·HKD 직접 입력', () => {
@@ -81,4 +100,12 @@ test('네이버 일별 시세 파싱', () => {
     <td class="num">193.21</td><td class="num"><img> 0.31</td></tr>
     <tr><td class="date">2026.10.21</td><td class="num">1,192.90</td></tr>`;
   assert.deepEqual(parseDailyQuote(html), [{ date: '2026-10-22', rate: 193.21 }, { date: '2026-10-21', rate: 1192.9 }]);
+});
+
+test('문서번호 비교: 장부 접두어 허용', async () => {
+  const { sameDocNo } = await import('../src/rules.js');
+  assert.ok(sameDocNo('INV #HKSO2311039', 'HKSO2311039'));
+  assert.ok(sameDocNo('#401379001', '401379001'));
+  assert.ok(!sameDocNo('#401379001', '401379002'));
+  assert.ok(!sameDocNo('#12', '2'));
 });

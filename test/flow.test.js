@@ -227,6 +227,49 @@ test('거래 증빙이 아님 → 확인 → "등록"이면 진행', async () =>
   assert.match(h.lastTo(ACCT, 'buttons').body, /\[승인 요청\]/);
 });
 
+test('송금 확인 화면 → 기존 장부 행 안내 → "번호 입금완료" 또는 "등록"', async () => {
+  const seed = { 'Expenses (SG&A)': [['#20260368', 'f', '#20260824', 20260824, 'HK Electric', 'HKD', 'Electricity Bill', 23116, 23116, '', '', '']] };
+  const h = harness((args) => (args.answers.length
+    ? { readable: true, doc_type: 'receipt', date: '2026-08-29', vendor: 'HK Electric', currency: 'HKD', total: 23116, items: [{ name: '전기요금', category: 'Other', amount: 23116 }] }
+    : { readable: true, doc_type: 'payment_slip', date: '2026-08-29', vendor: 'HONGKONG ELECTRIC', total: 23116, items: [] }), { ledgerSeed: seed });
+  await h.send({ ...IMG });
+  assert.match(h.lastTo(STAFF).body, /이미 같은 금액 건이 있어요: Expenses \(SG&A\) #20260368/);
+  assert.equal(h.lastTo(ACCT), undefined);
+  await h.send({ text: '등록' });
+  const c = h.lastTo(ACCT, 'buttons');
+  assert.match(c.body, /같은 날짜·금액 기록이 있어요|이미 장부에/, '등록해도 중복 경고가 붙음');
+});
+
+test('G01 법카 직원식사 → 경비, 구매 목적 표시·기록 / 번호 없는 Food는 PURF 번호', async () => {
+  const h = harness((args) => (args.message.includes('staff meal')
+    ? { readable: true, doc_type: 'receipt', date: '2026-07-09', vendor: 'McDonald’s Hong Kong', receipt_no: '', currency: 'HKD', total: 174, purpose: 'Staff meal', items: [{ name: 'Big Mac meal', qty: '4', amount: 174, category: 'Meal' }] }
+    : { readable: true, doc_type: 'receipt', date: '2026-09-21', vendor: 'Market Place', receipt_no: '', currency: 'HKD', total: 311.5, items: [{ name: 'Parmigiano 200g', qty: '1', amount: 78, category: 'Food' }, { name: 'Gorgonzola 250g', qty: '1', amount: 83, category: 'Food' }, { name: 'Philadelphia cream cheese', qty: '5', amount: 149.5, category: 'Food' }, { name: '비닐봉투', qty: '1', amount: 1, category: 'Other' }] }),
+  { ledgerSeed: { Purchase_Food: [['#292']] } });
+  await h.send({ ...IMG, text: '9/7 - mcdonalds staff meal / 법카결제완료' });
+  const c = h.lastTo(ACCT, 'buttons');
+  assert.match(c.body, /시트: Expenses \(SG&A\)/);
+  assert.match(c.body, /목적: Staff meal/);
+  await h.send({ type: 'interactive', replyId: c.buttons[0].id }, ACCT);
+  assert.equal(h.log.at(-1)['구매 목적'], 'Staff meal');
+
+  await h.send({ ...IMG, mediaId: 'm2', text: '' });
+  const c2 = h.lastTo(ACCT, 'buttons');
+  assert.match(c2.body, /시트: Purchase_Food/);
+  await h.send({ type: 'interactive', replyId: c2.buttons[0].id }, ACCT);
+  const row = h.tabs.Purchase_Food.at(-1);
+  const y = new Date(Date.now() + 8 * 3600e3).getUTCFullYear();
+  assert.deepEqual([row[0], row[2]], ['#293', `${y} PURF (293)`]);
+});
+
+test('G10 Statement → 이미 장부에 있는 인보이스면 새 매입으로 넣지 않음', async () => {
+  const seed = { Purchase_Drink: [['#202', 'f', 'INV #HKSO2311039', 20260512, 'Prime Cellar HK', 'HKD', 'International Wine Sourcing', 2802, 2802, '', '', '']] };
+  const h = harness(() => ({ readable: true, doc_type: 'statement', date: '2026-06-30', vendor: 'Prime Cellar (H.K.) Limited', related_no: 'HKSO2311039', total: 2802, items: [] }), { ledgerSeed: seed });
+  await h.send({ ...IMG, mimeType: 'application/pdf' });
+  assert.match(h.lastTo(STAFF).body, /statement의 인보이스는 이미 장부에 있어요: Purchase_Drink #202/);
+  assert.equal(h.lastTo(ACCT), undefined);
+  assert.equal(h.tabs.Purchase_Drink.length, 2);
+});
+
 test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
   const h = harness(() => CFF);
   await h.bot.handle({ id: 'z', from: '85299999999', name: '?', type: 'text', text: '도움말' });

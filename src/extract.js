@@ -25,7 +25,7 @@ const TOOL = {
             name: { type: 'string', description: '품목명만' },
             qty: { type: 'string', description: '수량 (단위 포함 가능)' },
             amount: { type: 'number', description: '그 품목의 결제금액' },
-            category: { type: 'string', enum: ['Food', 'Drink', 'Other', 'Unclear'] },
+            category: { type: 'string', enum: ['Food', 'Drink', 'Meal', 'Other', 'Unclear'] },
           },
           required: ['name', 'category'],
         },
@@ -42,11 +42,14 @@ export function buildPrompt({ sender, message, answers = [], vendors = [], today
 
 규칙
 - items에는 품목명과 수량만(가격·설명 제외). amount는 그 품목의 결제금액(영수증 통화 숫자).
-- category: Food(식재료·식품), Drink(음료·주류·커피/차 원료), Other(소모품·포장재·교통·비품 등 식음료가 아닌 것), Unclear(판독 불가 또는 무엇인지 모름).
+- category: Food(가게에서 쓸 식재료·식품을 산 것), Drink(가게에서 쓸 음료·주류·커피/차 원료를 산 것), Meal(식당·카페·바·배달앱에서 사 먹고 마신 음식·음료 — 회식·접대·회의·직원 식대. 식재료 구매가 아님), Other(소모품·포장재·교통·수리·공과금·비품 등), Unclear(판독 불가 또는 무엇인지 모름).
+  예: 스타벅스 커피·식당 점심·바 계산서·Keeta 배달 = Meal / 치즈·생선·과일을 마켓에서 구매 = Food / 와인 도매 구매 = Drink.
+  품목이 없는 카드 전표·결제 문자라도 가게 이름이 식당·카페·바면 Meal로 둔다.
 - 영수증이 아니거나 날짜·거래처·총액 중 하나라도 읽을 수 없으면 readable=false, question에 질문을 쓴다. 올린 사람의 추가 답변·정정이 있으면 반드시 그대로 반영한다(답변이 우선).
 - 연도가 없으면 오늘(${today}) 기준으로 가장 최근 날짜로 본다.
 - Credit Note는 doc_type=credit_note, total은 차감 금액(양수), related_no에 원래 인보이스 번호.
-- 가격표·견적·상품 사진처럼 거래 증빙이 아니면 doc_type=other, 송금·입금 확인 화면은 doc_type=payment_slip으로 표시하고 notes에 무엇인지 쓴다.
+- 가격표·견적·상품 사진·결제 전 장바구니처럼 거래 증빙이 아니면 doc_type=other, 송금·이체 확인 화면과 카드 결제 알림 문자는 doc_type=payment_slip으로 표시하고 notes에 무엇인지 쓴다(payment_slip도 금액·날짜·받는 곳은 채운다).
+- 신분증·여권·은행 계좌 화면 등 개인정보 문서면 doc_type=other로 하고, 이름·번호 등 개인정보는 어떤 칸에도 옮겨 적지 않는다(notes에는 "신분증" 같은 종류만).
 
 알려진 거래처(기준정보): ${vendorList}
 올린 사람: ${sender || '(이름 없음)'}
