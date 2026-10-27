@@ -40,6 +40,7 @@ function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, le
     insertLedgerRow: async (tab, values) => { tabs[tab].push([...values]); return tabs[tab].length; },
     updateLedgerRow: async (tab, rowNumber, vals) => { tabs[tab][rowNumber - 1] = [tabs[tab][rowNumber - 1][0], ...vals]; },
     updateRef: async (tab, rowNumber, ref) => { tabs[tab][rowNumber - 1][11] = ref; },
+    updatePaid: async (tab, rowNumber, { paidDate, account, ref }) => { const r = tabs[tab][rowNumber - 1]; r[9] = paidDate; if (account) r[10] = account; r[11] = ref; },
     appendLog: async (o) => { log.push(o); },
   };
   const fx = { cnyToHkd: fxImpl || (async () => ({ rate: 1.10238, source: '네이버 매매기준율 테스트' })) };
@@ -88,12 +89,14 @@ test('직원 영수증(선지불) → 회계 승인 → 장부 저장 → 입금
   assert.equal(h.log.at(-1).상태, '저장');
   assert.equal(h.log.at(-1).승인자, '고성찬 이사');
 
-  await h.send({ text: '#293 입금완료' });
+  await h.send({ text: '#293 입금완료', timestamp: Date.UTC(2026, 9, 27, 17, 30) }); // 홍콩 10/28 01:30
   const pc = h.lastTo(ACCT, 'buttons');
   assert.match(pc.body, /입금완료 확인/);
   assert.equal(row[11], '한상훈 매니져님 선지불, 추후 입금 해야함', '회계 확인 전에는 그대로');
   await h.send({ type: 'interactive', replyId: pc.buttons[0].id }, ACCT);
   assert.equal(h.tabs.Purchase_Food.at(-1)[11], '한상훈 매니져님 대표 선지불, 추후 입금완료');
+  assert.equal(h.tabs.Purchase_Food.at(-1)[9], 20261028, '지급일 = 입금완료 메시지의 홍콩 날짜');
+  assert.match(pc.body, /지급일: 2026-10-28/);
   assert.match(h.lastTo(STAFF).body, /반영됐어요/);
 });
 
