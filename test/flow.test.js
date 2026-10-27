@@ -9,7 +9,7 @@ import { CATEGORIES } from '../src/rules.js';
 const STAFF = '85291110000';   // 한상훈 매니져님 (직원)
 const ACCT = '85292220000';    // 고성찬 (회계)
 
-function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, ledgerSeed = {} } = {}) {
+function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, ledgerSeed = {}, batchMs = 0 } = {}) {
   const sent = [];
   const tabs = Object.fromEntries(Object.values(CATEGORIES).map((t) => [t, [['No.'], ...(ledgerSeed[t] || [])]]));
   const log = [];
@@ -46,7 +46,7 @@ function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, le
   const fx = { cnyToHkd: fxImpl || (async () => ({ rate: 1.10238, source: '네이버 매매기준율 테스트' })) };
   const calls = [];
   const extract = async (args) => { calls.push(args); return extractImpl(args, calls.length); };
-  const bot = createBot({ wa, extract, sheets, fx, approvalTemplate: 'approval_ping', log: { warn() {}, error() {} } });
+  const bot = createBot({ wa, extract, sheets, fx, approvalTemplate: 'approval_ping', log: { warn() {}, error() {} }, batchMs });
   let n = 0;
   const send = (m, from = STAFF) => bot.handle({ id: 'm' + (++n), from, name: 'wa-profile', type: 'text', ...m });
   const lastTo = (to, kind) => sent.filter((s) => s.to === to && (!kind || s.kind === kind)).at(-1);
@@ -305,6 +305,21 @@ test('사진 한 장에 영수증 2장 → 2건으로 나눠 승인·저장 (1�
   const rows = h.tabs['Expenses (SG&A)'].slice(-2);
   assert.deepEqual(rows.map((r) => [r[2], r[7]]), [['0101294013', 42], ['0201679864', 85]]);
   assert.equal(rows[0][6], 'H.Amer x1');
+});
+
+test('연달아 보낸 사진 2장(장바구니 + 카드 결제 문자) → 한 번에 함께 읽어 1건 접수', async () => {
+  const h = harness(() => ({ readable: true, doc_type: 'receipt', date: '2026-07-23', vendor: 'TAOBAO', receipt_no: '', currency: 'HKD', total: 1155.29,
+    items: [{ name: '珂邻一次性手套丁腈 L', qty: '16', category: 'Other' }, { name: '珂邻一次性手套丁腈 M', qty: '4', category: 'Other' }],
+    mismatch: '주문 화면 CNY 887.04 ↔ 카드 결제 HKD 1,155.29' }), { batchMs: 30 });
+  await h.send({ ...IMG, mediaId: 'cart' });
+  await h.send({ ...IMG, mediaId: 'sms' });
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(h.calls.length, 1, 'AI 판독은 한 번');
+  assert.equal(h.calls[0].media.length, 2, '두 사진을 함께 보냄');
+  assert.match(h.sent.filter((s) => s.to === STAFF).map((s) => s.body).join('\n'), /사진 2장을 받았어요/);
+  const card = h.lastTo(ACCT, 'buttons');
+  assert.match(card.body, /HKD 1,155\.29/);
+  assert.match(card.body, /증빙끼리 금액이 달라요/);
 });
 
 test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
