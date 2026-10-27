@@ -8,7 +8,8 @@ const TOOL = {
     type: 'object',
     properties: {
       readable: { type: 'boolean', description: '영수증이며 날짜·거래처·총액을 모두 읽을 수 있으면 true' },
-      question: { type: 'string', description: 'readable=false일 때 올린 사람에게 보낼 짧고 구체적인 한국어 질문' },
+      question: { type: 'string', description: 'readable=false일 때 올린 사람에게 보낼 짧고 구체적인 한국어 질문. 빠진 필수값(날짜·거래처·총액, 품목을 전혀 알 수 없을 때만 품목)만 묻는다' },
+      missing: { type: 'array', items: { type: 'string', enum: ['date', 'vendor', 'total', 'items'] }, description: 'readable=false일 때 읽지 못한 필수값' },
       doc_type: { type: 'string', enum: ['receipt', 'invoice', 'credit_note', 'payment_slip', 'statement', 'other'], description: '증빙 종류. 송금·입금 확인 화면은 payment_slip' },
       related_no: { type: 'string', description: 'Credit Note·수정 인보이스·statement가 가리키는 원래 인보이스 번호(여러 개면 쉼표), 없으면 빈 문자열' },
       purpose: { type: 'string', description: '구매 목적·용도 (메시지에 있으면 그대로 짧게, 예: Staff meal, Team Building). 없으면 빈 문자열 — 추측 금지' },
@@ -62,7 +63,7 @@ export function buildPrompt({ sender, message, answers = [], vendors = [], today
 - category: Food(가게에서 쓸 식재료·식품을 산 것), Drink(가게에서 쓸 음료·주류·커피/차 원료를 산 것), Meal(식당·카페·바·배달앱에서 사 먹고 마신 음식·음료 — 회식·접대·회의·직원 식대. 식재료 구매가 아님), Other(소모품·포장재·교통·수리·공과금·비품 등), Unclear(판독 불가 또는 무엇인지 모름).
   예: 스타벅스 커피·식당 점심·바 계산서·Keeta 배달 = Meal / 치즈·생선·과일을 마켓에서 구매 = Food / 와인 도매 구매 = Drink.
   품목이 없는 카드 전표·결제 문자라도 가게 이름이 식당·카페·바면 Meal로 둔다.
-- 영수증이 아니거나 날짜·거래처·총액 중 하나라도 읽을 수 없으면 readable=false, question에 질문을 쓴다. 올린 사람의 추가 답변·정정이 있으면 반드시 그대로 반영한다(답변이 우선).
+- 영수증이 아니거나 날짜·거래처·총액 중 하나라도 읽을 수 없으면 readable=false로 하고 missing에 빠진 값을 적고, question에는 그 빠진 값만 묻는다. 품목이 영수증에 보이면 품목·용도(구매 목적)는 묻지 않는다 — 용도는 선택 정보다. 읽은 값(거래처·총액·품목 등)은 readable=false여도 해당 칸에 채워 둔다. 올린 사람의 추가 답변·정정이 있으면 반드시 그대로 반영한다(답변이 우선).
 - 연도가 없으면 오늘(${today}) 기준으로 가장 최근 날짜로 본다.
 - 월별 거래명세서(Statement)는 doc_type=statement. total은 그 기간에 새로 생긴 구매액(Current Month·당월 인보이스 합계)이고, 이월 잔액(B/F·Opening)·최종 잔액(Balance)·입금액은 넣지 않는다. date는 기간 마지막 날. receipt_no는 statement 번호가 있으면 그 번호, 없으면 '<거래처 짧은 이름> YYYY-MM Statement'. items는 'YYYY-MM Statement (인보이스 N건)' 한 줄(category Unclear)로 하고, 인보이스 번호들은 related_no에 쉼표로 적는다.
 - Credit Note는 doc_type=credit_note, total은 차감 금액(양수), related_no에 원래 인보이스 번호.

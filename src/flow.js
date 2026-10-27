@@ -8,6 +8,9 @@ import {
 } from './rules.js';
 import { SUPPORTED_MIME } from './extract.js';
 
+/** 홍콩 기준 오늘 ± n일 → YYYY-MM-DD */
+const ymdOffset = (n) => new Date(Date.now() + 8 * 3600e3 + n * 864e5).toISOString().slice(0, 10);
+const UNSUPPORTED_TEXT = '사진, PDF, 글자 메시지만 처리할 수 있어요. 음성 메시지는 아직 지원하지 않아요.';
 const TTL = { asking: 3 * 864e5, notdoc: 3 * 864e5, pending: 14 * 864e5 };
 const CAT_WORDS = [
   [/food|식재료|푸드|식품/i, 'Purchase_Food'],
@@ -235,7 +238,17 @@ export function createBot({
   async function route(d) {
     const { approvers: apprs } = await people();
     if (d.state === 'asking') {
-      await wa.sendText(d.phone, `${d.ai?.question || '영수증을 읽기 어려워요. 날짜·업체·총액을 알려 주시겠어요?'}\n(답장해 주시면 반영해서 다시 읽을게요. 그만두려면 "취소")`);
+      const q = d.ai?.question || '영수증을 읽기 어려워요. 날짜·업체·총액을 알려 주시겠어요?';
+      const missing = Array.isArray(d.ai?.missing) ? d.ai.missing : [];
+      if (missing.length === 1 && missing[0] === 'date') {
+        // 날짜만 안 보이면 최근 날짜를 버튼으로 제안 (추측해서 넣지 않고 올린 사람이 고른다)
+        const days = [0, 1, 2].map((n) => ymdOffset(-n));
+        const label = (ymd, n) => `${['오늘', '어제', '그제'][n]} ${ymd.slice(5).replace('-', '/')}`;
+        await wa.sendButtons(d.phone, `${q}\n\n아래에서 고르거나, 다른 날짜면 "날짜 10/20"처럼 답장해 주세요. 그만두려면 "취소".`,
+          days.map((ymd, n) => ({ id: `date:${d.id}:${ymd}`, title: label(ymd, n) })));
+        return persist();
+      }
+      await wa.sendText(d.phone, `${q}\n(답장해 주시면 반영해서 다시 읽을게요. 그만두려면 "취소")`);
       return persist();
     }
     if (d.state === 'notdoc') {
@@ -415,6 +428,11 @@ export function createBot({
   // ---------- 버튼 ----------
   async function handleReply(msg, who, isApprover) {
     const [action, id, v, extra] = String(msg.replyId).split(':');
+    if (action === 'date') {
+      const d = drafts.get(id);
+      if (!d || d.state !== 'asking') return wa.sendText(msg.from, '이 건은 이미 처리됐거나 만료됐어요.');
+      return correct(d, `날짜 ${v}`, false);
+    }
     if (action === 'pok' || action === 'pno') {
       const p = paidReqs.get(id);
       if (!p) return wa.sendText(msg.from, '이미 처리된 요청이에요.');
@@ -511,7 +529,16 @@ export function createBot({
         return await startDraft(msg, who);
       }
       if (msg.type === 'text' || msg.type === 'button') return await handleText(msg, who, isApprover);
-      await wa.sendText(msg.from, '사진, PDF, 글자 메시지만 처리할 수 있어요. 음성 메시지는 아직 지원하지 않아요.');
+      // 사진 여러 장을 앨범으로 보내면 WhatsApp이 'unsupported' 묶음 메시지를 먼저 보낸다 → 곧 사진이 오면 안내하지 않음
+      if (msg.type === 'unsupported' && batchMs > 0) {
+        clearTimeout(unsupportedTimers.get(msg.from));
+        unsupportedTimers.set(msg.from, setTimeout(() => {
+          unsupportedTimers.delete(msg.from);
+          wa.sendText(msg.from, UNSUPPORTED_TEXT).catch(() => {});
+        }, Math.max(batchMs * 2, 3000)));
+        return;
+      }
+      await wa.sendText(msg.from, UNSUPPORTED_TEXT);
     } catch (e) {
       log.error?.('처리 실패', msg.id, e);
       await wa.sendText(msg.from, '처리 중 문제가 생겼어요. 잠시 후 다시 보내 주세요.').catch(() => {});
@@ -520,7 +547,9 @@ export function createBot({
 
   // 연달아 보낸 사진(예: 장바구니 화면 + 카드 결제 문자)은 batchMs 동안 모아 한 번에 읽는다
   const albums = new Map();
+  const unsupportedTimers = new Map();
   function collect(msg, who) {
+    clearTimeout(unsupportedTimers.get(msg.from)); unsupportedTimers.delete(msg.from);
     const a = albums.get(msg.from) || { msgs: [], who };
     a.msgs.push(msg);
     clearTimeout(a.timer);
