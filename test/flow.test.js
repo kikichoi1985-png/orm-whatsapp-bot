@@ -322,6 +322,32 @@ test('연달아 보낸 사진 2장(장바구니 + 카드 결제 문자) → 한 
   assert.match(card.body, /증빙끼리 금액이 달라요/);
 });
 
+test('앨범 전송 시 먼저 오는 unsupported 메시지는 안내하지 않고 사진만 함께 읽음', async () => {
+  const h = harness(() => CFF, { batchMs: 30 });
+  await h.send({ type: 'unsupported' });
+  await h.send({ ...IMG, mediaId: 'a' });
+  await h.send({ ...IMG, mediaId: 'b' });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.doesNotMatch(h.sent.filter((s) => s.to === STAFF).map((s) => s.body).join('\n'), /글자 메시지만/);
+  assert.equal(h.calls.length, 1);
+});
+
+test('날짜만 안 보이면 오늘·어제·그제 버튼 제안 → 고르면 그 날짜로 다시 읽음', async () => {
+  const base = { vendor: 'Lung Fung Mall', currency: 'HKD', total: 145, items: [{ name: 'CW 脆米菓 130G', qty: '3', amount: 51, category: 'Food' }] };
+  const h = harness((args) => (args.answers.some((a) => /날짜/.test(a))
+    ? { readable: true, doc_type: 'receipt', date: args.answers.at(-1).replace('날짜 ', ''), ...base }
+    : { readable: false, missing: ['date'], question: '구매 날짜가 보이지 않아요. 언제 사셨나요?', ...base }));
+  await h.send({ ...IMG });
+  const q = h.lastTo(STAFF, 'buttons');
+  assert.equal(q.buttons.length, 3);
+  assert.match(q.buttons[0].title, /^오늘 \d\d\/\d\d$/);
+  assert.doesNotMatch(q.body, /용도/);
+  await h.send({ type: 'interactive', replyId: q.buttons[1].id });
+  const card = h.lastTo(ACCT, 'buttons');
+  const yday = new Date(Date.now() + 8 * 3600e3 - 864e5).toISOString().slice(0, 10);
+  assert.match(card.body, new RegExp(`날짜: ${yday}`));
+});
+
 test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
   const h = harness(() => CFF);
   await h.bot.handle({ id: 'z', from: '85299999999', name: '?', type: 'text', text: '도움말' });
