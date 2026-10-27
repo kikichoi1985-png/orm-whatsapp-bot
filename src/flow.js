@@ -4,7 +4,7 @@
 import {
   CATEGORIES, classify, toHKD, isPrepaidText, isPaidText, prepaidRef, paidRef, prepaidNameFromRef, findPrepaidRow,
   detailsText, fmtMoney, round2, ymdNumber, nextNo, fallbackReceiptNo, findDuplicate, findPaidRow, normalizeNo, sameDocNo, hkdOverride,
-  hkYear, hkStamp, DEFAULT_REF,
+  hkYear, hkStamp, hkDateNumber, fmtYmd, DEFAULT_REF,
 } from './rules.js';
 import { SUPPORTED_MIME } from './extract.js';
 
@@ -356,23 +356,27 @@ export function createBot({
     }
     const cfg = await config();
     const ref = paidRef(prepaidNameFromRef(hit.ref), cfg.REF_PAID || DEFAULT_REF.paid);
+    // 지급일 = 입금했다고 알린 메시지의 날짜(홍콩), 계좌 = Config 기본값
+    const paidDate = hkDateNumber(msg.timestamp || Date.now());
+    const account = String(cfg.PAYMENT_ACCOUNT_DEFAULT || '').trim();
     const { approvers: apprs } = await people();
     if (isApprover || !apprs.length) {
-      await applyPaid({ hit, ref, reporter: who.name, approver: who.name });
-      await wa.sendText(msg.from, `${hit.tab} ${hit.no} (${hit.vendor}, HKD ${fmtMoney(hit.hkd)}) REF를 바꿨어요.\n→ ${ref}`);
+      await applyPaid({ hit, ref, paidDate, account, reporter: who.name, approver: who.name });
+      await wa.sendText(msg.from, `${hit.tab} ${hit.no} (${hit.vendor}, HKD ${fmtMoney(hit.hkd)}) 입금완료를 반영했어요.\n지급일: ${fmtYmd(paidDate)}\nREF → ${ref}`);
       return;
     }
-    const p = { id: newId('P'), hit, ref, reporter: who.name, reporterPhone: msg.from, createdAt: Date.now() };
+    const p = { id: newId('P'), hit, ref, paidDate, account, reporter: who.name, reporterPhone: msg.from, createdAt: Date.now() };
     paidReqs.set(p.id, p);
     for (const a of apprs) await toApprover(a, () => wa.sendButtons(a, paidCard(p), [{ id: `pok:${p.id}`, title: '반영' }, { id: `pno:${p.id}`, title: '무시' }]));
     await wa.sendText(msg.from, `${hit.no} 입금완료 보고를 회계 담당에게 보냈어요. 확인되면 장부 REF가 바뀌어요.`);
     persist();
   }
-  const paidCard = (p) => `[입금완료 확인] ${p.hit.tab} ${p.hit.no}\n업체: ${p.hit.vendor}\n금액: HKD ${fmtMoney(p.hit.hkd)}\n보고: ${p.reporter}\n현재 REF: ${p.hit.ref}\n바꿀 REF: ${p.ref}`;
-  async function applyPaid({ hit, ref, reporter, approver }) {
+  const paidCard = (p) => `[입금완료 확인] ${p.hit.tab} ${p.hit.no}\n업체: ${p.hit.vendor}\n금액: HKD ${fmtMoney(p.hit.hkd)}\n보고: ${p.reporter}\n지급일: ${fmtYmd(p.paidDate)}${p.account ? `\n계좌: ${p.account}` : ''}\n현재 REF: ${p.hit.ref}\n바꿀 REF: ${p.ref}`;
+  async function applyPaid({ hit, ref, paidDate, account, reporter, approver }) {
     const fresh = (await sheets.listLedger()).find((r) => r.tab === hit.tab && r.no === hit.no) || hit;
-    await sheets.updateRef(fresh.tab, fresh.rowNumber, ref);
-    await sheets.appendLog({ 처리ID: hit.no, 상태: '입금완료 반영', 시트: hit.tab, 'No.': hit.no, 영수증번호: hit.receiptNo, 업체: hit.vendor, HKD: hit.hkd, 올린사람: reporter, 승인자: approver, '메시지·정정': ref, 처리시각: hkStamp() })
+    paidDate = paidDate || hkDateNumber(Date.now());
+    await sheets.updatePaid(fresh.tab, fresh.rowNumber, { paidDate, account, ref });
+    await sheets.appendLog({ 처리ID: hit.no, 상태: '입금완료 반영', 시트: hit.tab, 'No.': hit.no, 영수증번호: hit.receiptNo, 업체: hit.vendor, HKD: hit.hkd, 올린사람: reporter, 승인자: approver, '메시지·정정': `${ref} / 지급일 ${paidDate}${account ? ' / ' + account : ''}`, 처리시각: hkStamp() })
       .catch((e) => log.warn?.('AI_Log 기록 실패', e.message));
   }
 
@@ -384,8 +388,8 @@ export function createBot({
       if (!p) return wa.sendText(msg.from, '이미 처리된 요청이에요.');
       paidReqs.delete(id); persist();
       if (action === 'pno') return wa.sendText(msg.from, `${p.hit.no} 입금완료 보고를 반영하지 않았어요.`);
-      await applyPaid({ hit: p.hit, ref: p.ref, reporter: p.reporter, approver: who.name });
-      await wa.sendText(msg.from, `${p.hit.no} REF를 바꿨어요.\n→ ${p.ref}`);
+      await applyPaid({ hit: p.hit, ref: p.ref, paidDate: p.paidDate, account: p.account, reporter: p.reporter, approver: who.name });
+      await wa.sendText(msg.from, `${p.hit.no} 입금완료를 반영했어요.\n지급일: ${fmtYmd(p.paidDate || hkDateNumber(Date.now()))}\nREF → ${p.ref}`);
       if (p.reporterPhone !== msg.from) await wa.sendText(p.reporterPhone, `${p.hit.no} 입금완료가 장부에 반영됐어요.`).catch(() => {});
       return;
     }
