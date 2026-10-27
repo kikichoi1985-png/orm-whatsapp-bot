@@ -10,7 +10,8 @@ const TOOL = {
       readable: { type: 'boolean', description: '영수증이며 날짜·거래처·총액을 모두 읽을 수 있으면 true' },
       question: { type: 'string', description: 'readable=false일 때 올린 사람에게 보낼 짧고 구체적인 한국어 질문. 빠진 필수값(날짜·거래처·총액, 품목을 전혀 알 수 없을 때만 품목)만 묻는다' },
       missing: { type: 'array', items: { type: 'string', enum: ['date', 'vendor', 'total', 'items'] }, description: 'readable=false일 때 읽지 못한 필수값' },
-      doc_type: { type: 'string', enum: ['receipt', 'invoice', 'credit_note', 'payment_slip', 'statement', 'other'], description: '증빙 종류. 송금·입금 확인 화면은 payment_slip' },
+      doc_type: { type: 'string', enum: ['receipt', 'invoice', 'credit_note', 'payment_slip', 'statement', 'cash_withdrawal', 'other'], description: '증빙 종류. 송금·입금 확인 화면은 payment_slip, 은행 현금 인출 통지서는 cash_withdrawal' },
+      handwritten: { type: 'string', description: '종이에 손글씨로 덧쓴 금액·메모가 있으면 그대로(예: "400 지우고 1500, Carlos, 2026 07 Bonus"). 없으면 빈 문자열' },
       related_no: { type: 'string', description: 'Credit Note·수정 인보이스·statement가 가리키는 원래 인보이스 번호(여러 개면 쉼표), 없으면 빈 문자열' },
       purpose: { type: 'string', description: '구매 목적·용도 (메시지에 있으면 그대로 짧게, 예: Staff meal, Team Building). 없으면 빈 문자열 — 추측 금지' },
       date: { type: 'string', description: 'YYYY-MM-DD' },
@@ -44,6 +45,7 @@ const TOOL = {
             currency: { type: 'string' }, total: { type: 'number' }, payment_method: { type: 'string' }, purpose: { type: 'string' },
             items: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, qty: { type: 'string' }, amount: { type: 'number' }, category: { type: 'string', enum: ['Food', 'Drink', 'Meal', 'Other', 'Unclear'] } }, required: ['name', 'category'] } },
             notes: { type: 'string' },
+            handwritten: { type: 'string' },
           },
           required: ['total', 'items'],
         },
@@ -59,15 +61,17 @@ export function buildPrompt({ sender, message, answers = [], vendors = [], today
 
 규칙
 - items에는 품목명과 수량만(가격·설명 제외). 품목명은 영수증에 찍힌 표기 그대로 쓴다(약어도 그대로, 번역·풀이·괄호 설명·'추정' 금지 — 풀이가 필요하면 notes에). amount는 그 품목의 결제금액(영수증 통화 숫자).
+- 할인·쿠폰·특가 차감 줄(예: '韓國食品特價 -6.0')은 별도 품목으로 넣지 않고, 그 할인이 붙은 바로 위 품목의 amount에서 뺀다.
 - 한 사진·PDF에 서로 다른 영수증(영수증번호·결제가 따로인 것)이 2장 이상이면 절대 합산하지 않는다. receipts에 영수증마다 하나씩 기록하고, 맨 위 필드에는 첫 번째 영수증을 기록한다.
 - category: Food(가게에서 쓸 식재료·식품을 산 것), Drink(가게에서 쓸 음료·주류·커피/차 원료를 산 것), Meal(식당·카페·바·배달앱에서 사 먹고 마신 음식·음료 — 회식·접대·회의·직원 식대. 식재료 구매가 아님), Other(소모품·포장재·교통·수리·공과금·비품 등), Unclear(판독 불가 또는 무엇인지 모름).
   예: 스타벅스 커피·식당 점심·바 계산서·Keeta 배달 = Meal / 치즈·생선·과일을 마켓에서 구매 = Food / 와인 도매 구매 = Drink.
-  품목이 없는 카드 전표·결제 문자라도 가게 이름이 식당·카페·바면 Meal로 둔다.
+  품목이 없는 카드 전표·결제 문자라도 가게 이름이 식당·카페·바면 Meal로 둔다. 이때 items는 'Food & Beverage (카드 전표, 품목 없음)' 한 줄로 쓰고, 'Mastercard Sale'·'Sale'·'Payment' 같은 결제 문구를 품목으로 쓰지 않는다.
 - 영수증이 아니거나 날짜·거래처·총액 중 하나라도 읽을 수 없으면 readable=false로 하고 missing에 빠진 값을 적고, question에는 그 빠진 값만 묻는다. 품목이 영수증에 보이면 품목·용도(구매 목적)는 묻지 않는다 — 용도는 선택 정보다. 읽은 값(거래처·총액·품목 등)은 readable=false여도 해당 칸에 채워 둔다. 올린 사람의 추가 답변·정정이 있으면 반드시 그대로 반영한다(답변이 우선).
 - 연도가 없으면 오늘(${today}) 기준으로 가장 최근 날짜로 본다.
 - 월별 거래명세서(Statement)는 doc_type=statement. total은 그 기간에 새로 생긴 구매액(Current Month·당월 인보이스 합계)이고, 이월 잔액(B/F·Opening)·최종 잔액(Balance)·입금액은 넣지 않는다. date는 기간 마지막 날. receipt_no는 statement 번호가 있으면 그 번호, 없으면 '<거래처 짧은 이름> YYYY-MM Statement'. items는 'YYYY-MM Statement (인보이스 N건)' 한 줄(category Unclear)로 하고, 인보이스 번호들은 related_no에 쉼표로 적는다.
 - Credit Note는 doc_type=credit_note, total은 차감 금액(양수), related_no에 원래 인보이스 번호.
 - 가격표·견적·상품 사진·결제 전 장바구니처럼 거래 증빙이 아니면 doc_type=other로 표시하고 notes에 무엇인지 쓴다.
+- 은행 ATM·창구 현금 인출 통지서(Customer Advice, Transaction: Cash withdrawal)는 doc_type=cash_withdrawal. date는 인출일, total은 인쇄된 인출 금액, currency HKD, vendor는 은행 이름(예: HSBC), receipt_no는 비움, items는 'Cash withdrawal' 한 줄(category Other). 손글씨로 고친 금액·이름·메모는 handwritten에 그대로 적는다(인쇄 금액을 바꾸지 않는다). 통지서가 여러 장이면 receipts에 한 장씩.
 - 은행 송금·이체 확인 화면은 doc_type=payment_slip(금액·날짜·받는 사람은 채운다).
 - 카드 결제 알림 문자·카드 전표·주문 완료 화면은 가게에서 결제한 기록이므로 doc_type=receipt로 본다.
 - 품목을 증빙에서 알 수 없으면 메시지의 설명으로 items를 채운다(예: "MS 이벤트 극세사 린넨 / refractometer"). 메시지에도 무엇을 샀는지 설명이 없으면 readable=false로 하고 무엇을 샀는지(품목·용도)를 묻는다. 품목을 추측해 만들지 않는다.

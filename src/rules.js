@@ -6,6 +6,12 @@ export const CATEGORIES = {
   Purchase_Drink: 'Purchase_Drink',
   Expenses: 'Expenses (SG&A)',
 };
+/** 현금 인출(패티캐쉬) 기록 탭 — 실제 회계 시트 'Patty Cash Record'와 같은 이름·열 */
+export const PATTY_TAB = 'Patty Cash Record';
+export const PATTY_HEADERS = ['No.', '날짜 (Date)', '캐쉬아웃 기록 (Transfer To/From)', '캐쉬아웃 (Withdrawal)', '캐쉬인 (Deposit)', '리마크 (Remark)'];
+export const PATTY_DEFAULT_DESC = 'Cash Withdrawal for patty cash';
+/** '리마크 …' 답장에서 리마크 문구만 꺼냄 */
+export const remarkFromText = (t) => { const m = String(t || '').match(/^\s*(?:리마크|remark|비고|메모)\s*[:：]?\s*(.+)$/is); return m ? m[1].trim() : null; };
 const ITEM_TO_CAT = { Food: 'Purchase_Food', Drink: 'Purchase_Drink', Other: 'Expenses' };
 
 export const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -45,7 +51,8 @@ export function classify(items = [], vendor, vendors = []) {
       if (['Food', 'Drink', 'Other'].includes(vt)) c = vt; else continue;
     }
     const amt = Number(it.amount);
-    if (Number.isFinite(amt) && amt > 0) sums[c] += amt; else missingAmount = true;
+    // 할인 줄(음수)은 그 카테고리 금액에서 빼고, 0원(증정품)은 그대로 둔다. 금액이 아예 없을 때만 '못 읽음'
+    if (it.amount !== undefined && it.amount !== null && it.amount !== '' && Number.isFinite(amt)) sums[c] += amt; else missingAmount = true;
     counts[c]++;
   }
   const present = Object.keys(counts).filter((k) => counts[k] > 0);

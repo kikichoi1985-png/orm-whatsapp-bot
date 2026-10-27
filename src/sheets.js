@@ -3,7 +3,7 @@
 //   Purchase_Food / Purchase_Drink / Expenses (SG&A)
 // 보조 탭: Staff(직원·승인자), Vendors(거래처 기준정보), Config(설정), AI_Log(처리 기록), _Pending(승인 대기 보관)
 import { google } from 'googleapis';
-import { CATEGORIES } from './rules.js';
+import { CATEGORIES, PATTY_TAB, PATTY_HEADERS } from './rules.js';
 
 export const LEDGER_HEADERS = [
   'No.', '인보이스 PDF_파일명/폴더 (File name)', '영수증번호 (Inv No.)', '영수증 날짜 (Inv Date)', '업체명 (Company)',
@@ -33,6 +33,7 @@ const TAB_DEFAULTS = {
     ['REF_PAID', '{name} 대표 선지불, 추후 입금완료', '입금완료 반영 시 REF (D11)'],
     ['PAYMENT_ACCOUNT_DEFAULT', '', '입금완료 반영 시 장부 K열(사용된 계좌)에 넣을 기본 계좌. 비워 두면 K열은 그대로'],
   ],
+  [PATTY_TAB]: [PATTY_HEADERS],
   AI_Log: [LOG_HEADERS],
   _Pending: [['처리ID', '데이터(JSON) — 서버 재시작 후 승인 대기 건 복구용. 직접 수정하지 마세요']],
 };
@@ -122,6 +123,15 @@ export function createSheetsStore({ sheetId, serviceAccountJson, cacheMs = 60_00
       const all = [];
       for (const t of LEDGER_TABS) all.push(...(await readTab(t)).rows);
       return all;
+    },
+
+    /** 패티캐쉬 탭 데이터 행 (A~F) */
+    async listPatty() {
+      if (!(PATTY_TAB in tabIds)) await loadMeta();
+      if (!(PATTY_TAB in tabIds)) return [];
+      const rows = await get(`${q(PATTY_TAB)}!A1:F`);
+      return rows.map((r, i) => ({ rowNumber: i + 1, no: String(r[0] ?? '').trim(), date: String(r[1] ?? ''), desc: String(r[2] ?? ''), out: r[3] ?? '', amount: r[4] ?? '', remark: String(r[5] ?? '') }))
+        .filter((r) => r.no.startsWith('#'));
     },
 
     /** 그 탭 A열 값 (번호 계산용) */

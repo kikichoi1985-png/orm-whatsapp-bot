@@ -4,12 +4,14 @@
 import {
   CATEGORIES, classify, toHKD, isPrepaidText, isPaidText, prepaidRef, paidRef, prepaidNameFromRef, findPrepaidRow,
   detailsText, fmtMoney, round2, ymdNumber, nextNo, fallbackReceiptNo, findDuplicate, findPaidRow, normalizeNo, sameDocNo, hkdOverride,
-  hkYear, hkStamp, hkDateNumber, fmtYmd, DEFAULT_REF,
+  hkYear, hkStamp, hkDateNumber, fmtYmd, DEFAULT_REF, PATTY_TAB, PATTY_DEFAULT_DESC, remarkFromText,
 } from './rules.js';
 import { SUPPORTED_MIME } from './extract.js';
 
 /** 홍콩 기준 오늘 ± n일 → YYYY-MM-DD */
 const ymdOffset = (n) => new Date(Date.now() + 8 * 3600e3 + n * 864e5).toISOString().slice(0, 10);
+/** '취소' 판단: 띄어쓰기·문장부호·흔한 오타 허용 (취쇼, 취소요, 취소해 줘, cancel, 그만) */
+export const isCancelText = (t) => { const n = String(t || '').replace(/[\s.!?~ㅠㅜ]/g, '').toLowerCase(); return n.length <= 7 && /^(취[소쇼]|츼소|취서|cancel|그만)/.test(n); };
 const UNSUPPORTED_TEXT = '사진, PDF, 글자 메시지만 처리할 수 있어요. 음성 메시지는 아직 지원하지 않아요.';
 const TTL = { asking: 3 * 864e5, notdoc: 3 * 864e5, pending: 14 * 864e5 };
 const CAT_WORDS = [
@@ -141,6 +143,8 @@ export function createBot({
       if (!(d.docType === 'statement' && !d.slipRow)) return;
       d.state = 'reading'; d.slip = undefined;
     }
+    if (d.docType === 'cash_withdrawal' && !d.manualCategory) return pattyExtraction(d, out);
+    d.kind = undefined;
     const items = Array.isArray(out.items) ? out.items : [];
     Object.assign(d, {
       date: out.date || '', vendor: out.vendor || '', receiptNo: String(out.receipt_no || '').replace(/^["'\s]+|["'\s]+$/g, ''), relatedNo: out.related_no || '',
@@ -181,28 +185,91 @@ export function createBot({
     if (!d.firstSnapshot) d.firstSnapshot = snapshot(d);
     d.state = 'pending';
   }
+  /** 은행 현금 인출 통지서 → 'Patty Cash Record' 1행 후보 */
+  async function pattyExtraction(d, out) {
+    Object.assign(d, {
+      kind: 'patty', category: '', reason: '은행 현금 인출 → 패티캐쉬 기록',
+      date: out.date || '', vendor: out.vendor || 'Bank', receiptNo: '', currency: 'HKD', items: [], purpose: '',
+      amount: Number(out.total) || 0, notes: out.notes || '', handwritten: out.handwritten || '',
+    });
+    if (d.amountManual != null) d.amount = d.amountManual;
+    d.hkd = d.amount;
+    d.pattyDesc = d.pattyDesc || PATTY_DEFAULT_DESC;
+    d.details = d.pattyDesc;
+    if (d.remark == null) d.remark = remarkFromText(d.message) ?? (d.message || '');
+    let dupRow = null;
+    try {
+      const ymd = String(d.date).slice(0, 10);
+      dupRow = (await sheets.listPatty()).find((r) => String(r.date).slice(0, 10) === ymd && Math.abs(Number(r.amount) - d.amount) < 0.005);
+    } catch (e) { log.warn?.('패티캐쉬 대조 실패', e.message); }
+    d.flags = [
+      d.handwritten ? `손글씨 메모가 있어요: "${d.handwritten}" — 금액이 다르면 "총액 7470"처럼 답장` : null,
+      dupRow ? `같은 날짜·금액의 패티캐쉬 기록이 있어요: ${dupRow.no}` : null,
+      !d.remark ? '리마크가 비어 있어요 — 올린 사람이 "리마크 내용"으로 답장할 수 있어요' : null,
+    ].filter(Boolean);
+    if (!d.firstSnapshot) d.firstSnapshot = snapshot(d);
+    d.state = 'pending';
+  }
+
   const snapshot = (d) => ({ 날짜: d.date, 업체: d.vendor, 영수증번호: d.receiptNo, 상세내역: d.details, 통화: d.currency, 금액: d.amount, HKD: d.hkd, 시트: d.category });
 
   const moneyLine = (d) => (d.currency === 'HKD'
     ? `HKD ${fmtMoney(d.amount)}`
     : `${d.currency} ${fmtMoney(d.amount)} → ${d.hkd == null ? 'HKD 미정' : `HKD ${fmtMoney(d.hkd)}`}${d.rateSource ? `\n  (${d.rateSource}${d.rate && d.rate !== 1 ? `, 환율 ${round2(d.rate * 1e4) / 1e4}` : ''})` : ''}`);
 
+  /** 현업이 읽는 근거 문구: 개발용 결정 코드([D10-1] 등)는 빼고 보여 준다 (AI_Log에는 코드 포함 원문 보관) */
+  const plainReason = (r) => String(r || '').replace(/\s*\[D\d+(?:[-·]\d+)*\]/g, '').trim();
+
+  /** 승인 카드 맨 위 경고: WhatsApp은 색을 못 쓰므로 이모지 + *굵게* 로 눈에 띄게 */
+  function warnBlock(d) {
+    if (!d.flags?.length) return null;
+    const strong = (f) => /이미 장부|같은 날짜·금액|중복|금액이 달라요|기존 행을 수정|차감/.test(f);
+    const lines = d.flags.map((f) => (strong(f) ? `🚨 *${plainReason(f)}*` : `ℹ️ ${plainReason(f)}`));
+    return `\n${lines.join('\n')}\n`;
+  }
+
   function body(d, forApprover) {
+    if (d.kind === 'patty') {
+      return [
+        forApprover ? `[승인 요청] ${d.id}${d.v > 1 ? ` (수정 ${d.v - 1})` : ''}` : `접수했어요 (${d.id})`,
+        forApprover ? warnBlock(d) : null,
+        forApprover ? `올린 사람: ${d.name}` : null,
+        `시트: ${PATTY_TAB}`,
+        `날짜: ${d.date || '-'}`,
+        `내용: ${d.pattyDesc}`,
+        `캐쉬인: HKD ${fmtMoney(d.amount)}`,
+        `리마크: ${d.remark || '-'}`,
+
+        '',
+        forApprover ? '고칠 내용은 답장으로 보내세요 (예: "총액 7470", "리마크 2026 07 Bonus").'
+          : '회계 담당 승인 후 Patty Cash Record에 저장돼요. 리마크를 남기려면 "리마크 내용"으로 답장해 주세요.',
+      ].filter((x) => x !== null).join('\n');
+    }
+    const sheet = CATEGORIES[d.category] || '미정 (회계 담당이 고름)';
+    if (!forApprover) {
+      // 직원용: 무엇이 접수됐는지만 짧게
+      return [
+        `접수했어요 (${d.id})`,
+        `${d.vendor || '-'} · ${d.date || '-'} · ${moneyLine(d).split('\n')[0]}`,
+        `내역: ${d.details || '-'}`,
+        d.prepaid ? `REF: ${prepaidRef(d.name, d.refTpl)}` : null,
+        '회계 담당 승인 후 장부에 저장돼요. 틀린 곳은 답장으로 알려 주세요.',
+      ].filter((x) => x !== null).join('\n');
+    }
     return [
-      forApprover ? `[승인 요청] ${d.id}${d.v > 1 ? ` (수정 ${d.v - 1})` : ''}` : `접수 ${d.id}`,
-      forApprover ? `올린 사람: ${d.name}` : null,
-      `시트: ${CATEGORIES[d.category] || '미정'}${d.reason ? `\n  근거: ${d.reason}` : ''}`,
-      `영수증번호: ${d.receiptNo || '-'}${d.docType === 'credit_note' ? ' (Credit Note)' : ''}`,
-      `날짜: ${d.date || '-'}`,
+      `[승인 요청] ${d.id}${d.v > 1 ? ` (수정 ${d.v - 1})` : ''}`,
+      warnBlock(d),
+      `올린 사람: ${d.name}`,
+      `시트: ${sheet}${d.reason ? ` — ${plainReason(d.reason)}` : ''}`,
       `업체: ${d.vendor || '-'}`,
+      `날짜: ${d.date || '-'}`,
+      `영수증번호: ${d.receiptNo || '-'}${d.docType === 'credit_note' ? ' (Credit Note)' : ''}`,
       `내역: ${d.details || '-'}`,
       d.purpose ? `목적: ${d.purpose}` : null,
       `금액: ${moneyLine(d)}`,
       d.prepaid ? `REF: ${prepaidRef(d.name, d.refTpl)}` : null,
-      d.flags?.length ? `\n확인 필요\n${d.flags.map((f) => `- ${f}`).join('\n')}` : null,
-      d.notes ? `메모: ${d.notes}` : null,
       '',
-      forApprover ? '고칠 내용은 답장으로 보내세요 (예: "분류 Drink", "총액 1200", "HKD 732.37").' : '회계 담당 승인 후 장부에 저장돼요. 틀린 곳은 답장으로 알려 주세요.',
+      '고칠 내용은 답장으로 보내세요 (예: "분류 Drink", "총액 1200").',
     ].filter((x) => x !== null).join('\n');
   }
 
@@ -248,7 +315,7 @@ export function createBot({
           days.map((ymd, n) => ({ id: `date:${d.id}:${ymd}`, title: label(ymd, n) })));
         return persist();
       }
-      await wa.sendText(d.phone, `${q}\n(답장해 주시면 반영해서 다시 읽을게요. 그만두려면 "취소")`);
+      await wa.sendButtons(d.phone, `${q}\n(답장해 주시면 반영해서 다시 읽을게요.)`, [{ id: `cancel:${d.id}`, title: '취소' }]);
       return persist();
     }
     if (d.state === 'notdoc') {
@@ -265,7 +332,7 @@ export function createBot({
       } else {
         next = '장부에 넣어야 하는 증빙이면 "등록"이라고 답장해 주세요. 아니면 "취소".';
       }
-      await wa.sendText(d.phone, `${what} 같아요${d.ai?.notes ? ` (${d.ai.notes})` : ''}.\n${next}`);
+      await wa.sendButtons(d.phone, `${what} 같아요.\n${next}`, [{ id: `reg:${d.id}`, title: '등록' }, { id: `cancel:${d.id}`, title: '취소' }]);
       return persist();
     }
     d.v = (d.v || 0) + 1;
@@ -318,6 +385,19 @@ export function createBot({
   /** 올린 사람 또는 승인자의 정정 → 다시 판독 후 다시 승인 요청 */
   async function correct(d, text, fromApprover) {
     d.answers.push(fromApprover ? `[회계 담당] ${text}` : text);
+    if (d.kind === 'patty') {
+      // 패티캐쉬: 리마크·금액·내용은 다시 읽지 않고 바로 반영
+      const rm = remarkFromText(text);
+      const amt = String(text).match(/^\s*(?:총액|금액|amount)\s*[:：]?\s*([\d,]+(?:\.\d+)?)\s*$/i);
+      const desc = String(text).match(/^\s*(?:내용|설명)\s*[:：]?\s*(.+)$/s);
+      if (rm != null || amt || desc) {
+        if (rm != null) d.remark = rm;
+        if (amt) d.amountManual = Number(amt[1].replace(/,/g, ''));
+        if (desc) d.pattyDesc = desc[1].trim();
+        await pattyExtraction(d, d.ai || {});
+        return route(d);
+      }
+    }
     const h = hkdOverride(text);
     if (h != null) d.hkdManual = h;
     const cat = /분류|시트/.test(text) && CAT_WORDS.find(([re]) => re.test(text));
@@ -334,6 +414,7 @@ export function createBot({
   const withLock = (fn) => { const p = lock.then(fn); lock = p.catch(() => {}); return p; };
 
   async function approve(d, approverPhone, approverName) {
+    if (d.kind === 'patty') return approvePatty(d, approverPhone, approverName);
     if (!d.category) return askCategory(d, approverPhone, '시트(분류)를 먼저 골라 주세요.');
     if (d.hkd == null) return wa.sendText(approverPhone, `${d.id}: HKD 금액을 정할 수 없어요. "HKD 금액"을 답장으로 보내 주세요 (예: "HKD 732.37").`);
     const cfg = await config();
@@ -357,6 +438,12 @@ export function createBot({
         await sheets.updateLedgerRow(fresh.tab, fresh.rowNumber, vals);
         return { tab: fresh.tab, no: fresh.no, rowNumber: fresh.rowNumber, revised: true };
       }
+      // 저장 직전 재확인: 카드를 만든 뒤 같은 증빙이 먼저 저장됐을 수 있다(연달아 두 번 보낸 경우)
+      if (d.docType !== 'credit_note') {
+        const late = findDuplicate(await sheets.listLedger(), d);
+        const known = d.dup?.row && late?.row && d.dup.row.tab === late.row.tab && d.dup.row.no === late.row.no;
+        if (late && ['duplicate', 'possible_duplicate'].includes(late.kind) && !known) return { blocked: late };
+      }
       const tab = CATEGORIES[d.category];
       const no = nextNo(d.category, await sheets.columnA(tab), year);
       const row = [no, fileLabel, d.receiptNo || fallbackReceiptNo(no, d.category, year), ymdNumber(d.date), d.vendor, d.currency, d.details, d.amount, d.hkd, '', '', ref];
@@ -364,6 +451,15 @@ export function createBot({
       return { tab, no, rowNumber, revised: false };
     });
 
+    if (result.blocked) {
+      d.dup = result.blocked;
+      const f = `${result.blocked.kind === 'duplicate' ? '이미 장부에 있는 증빙 같아요' : '번호 없는 증빙 — 같은 날짜·금액 기록이 있어요'}: ${result.blocked.row.tab} ${result.blocked.row.no}`;
+      d.flags = [f, ...(d.flags || []).filter((x) => !/이미 장부|같은 날짜·금액/.test(x))];
+      await wa.sendText(approverPhone, `${d.id}: 저장 직전에 확인해 보니 같은 증빙이 방금 저장됐어요(${result.blocked.row.tab} ${result.blocked.row.no}). 저장하지 않았어요. 새 카드를 확인해 주세요.`);
+      d.v = (d.v || 0) + 1;
+      await sendCard(d, [approverPhone]);
+      return persist();
+    }
     const final = snapshot(d);
     const changed = Object.keys(final).filter((k) => String(final[k] ?? '') !== String(d.firstSnapshot?.[k] ?? ''));
     await sheets.appendLog({
@@ -382,6 +478,25 @@ export function createBot({
     } else if (d.prepaid) {
       await wa.sendText(d.phone, `선지불 건이에요. 입금 후 "${result.no} 입금완료"라고 보내 주세요.`);
     }
+  }
+
+  async function approvePatty(d, approverPhone, approverName) {
+    const result = await withLock(async () => {
+      const no = nextNo('Purchase_Food', await sheets.columnA(PATTY_TAB), hkYear()); // 탭 안 일련번호 #N
+      const row = [no, String(d.date).slice(0, 10), d.pattyDesc, '', d.amount, d.remark || ''];
+      const rowNumber = await sheets.insertLedgerRow(PATTY_TAB, row);
+      return { tab: PATTY_TAB, no, rowNumber };
+    });
+    await sheets.appendLog({
+      처리ID: d.id, 상태: '저장', 시트: PATTY_TAB, 'No.': result.no, 업체: d.vendor, 통화: 'HKD', 금액: d.amount, HKD: d.amount,
+      '분류 근거': d.reason, 올린사람: d.name, 올린사람번호: d.phone, 승인자: approverName, 원메시지ID: d.sourceMessageId, 미디어ID: d.mediaId,
+      '메시지·정정': [d.message, ...d.answers].filter(Boolean).join(' / '), 'AI 원본': d.ai, '구매 목적': d.remark,
+      생성시각: new Date(d.createdAt + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' '), 처리시각: hkStamp(),
+    }).catch((e) => log.warn?.('AI_Log 기록 실패', e.message));
+    drafts.delete(d.id); media.delete(d.id); persist();
+    const where = `${PATTY_TAB} ${result.no} (${result.rowNumber}행)`;
+    await wa.sendText(approverPhone, `장부에 저장했어요: ${where}`);
+    if (d.phone !== approverPhone) await wa.sendText(d.phone, `회계 승인 완료 — ${where}에 저장됐어요.`).catch(() => {});
   }
 
   async function askCategory(d, phone, text) {
@@ -428,6 +543,13 @@ export function createBot({
   // ---------- 버튼 ----------
   async function handleReply(msg, who, isApprover) {
     const [action, id, v, extra] = String(msg.replyId).split(':');
+    if (action === 'cancel' || action === 'reg') {
+      const d = drafts.get(id);
+      if (!d || d.phone !== msg.from || !['asking', 'notdoc', 'pending'].includes(d.state)) return wa.sendText(msg.from, '이 건은 이미 처리됐거나 만료됐어요.');
+      if (action === 'cancel') { drafts.delete(d.id); media.delete(d.id); persist(); return wa.sendText(msg.from, `${d.id}를 취소했어요.`); }
+      d.forceReceipt = true;
+      return correct(d, '등록', false);
+    }
     if (action === 'date') {
       const d = drafts.get(id);
       if (!d || d.state !== 'asking') return wa.sendText(msg.from, '이 건은 이미 처리됐거나 만료됐어요.');
@@ -453,7 +575,9 @@ export function createBot({
     if (action === 'ok') return approve(d, msg.from, who.name);
     if (action === 'cat') return askCategory(d, msg.from, '시트(분류)를 골라 주세요.');
     if (action === 'set' && CATEGORIES[extra]) {
-      d.manualCategory = extra; d.category = extra; d.reason = '담당자가 직접 선택';
+      d.manualCategory = extra;
+      if (d.kind === 'patty') { d.kind = undefined; d.firstSnapshot = undefined; await runExtraction(d, d.ai); }
+      d.category = extra; d.reason = '담당자가 직접 선택';
       d.flags = (d.flags || []).filter((f) => !f.startsWith('분류 확인'));
       return route(d);
     }
@@ -487,7 +611,7 @@ export function createBot({
     // 내가 올린 건이 질문·확인 대기 중이면 그 건에 대한 답
     const mine = drafts.get(latest.get(msg.from));
     if (mine && ['asking', 'notdoc'].includes(mine.state)) {
-      if (/^취소$/.test(t)) { drafts.delete(mine.id); media.delete(mine.id); persist(); return wa.sendText(msg.from, `${mine.id}를 취소했어요.`); }
+      if (isCancelText(t)) { drafts.delete(mine.id); media.delete(mine.id); persist(); return wa.sendText(msg.from, `${mine.id}를 취소했어요.`); }
       if (mine.state === 'notdoc' && /^(등록|맞아|맞아요|yes)$/i.test(t)) mine.forceReceipt = true;
       return correct(mine, t, false);
     }
@@ -499,7 +623,7 @@ export function createBot({
     }
     // 올린 사람: 승인 대기 중인 내 건 정정
     if (mine && mine.state === 'pending') {
-      if (/^취소$/.test(t)) { drafts.delete(mine.id); media.delete(mine.id); persist(); return wa.sendText(msg.from, `${mine.id}를 취소했어요.`); }
+      if (isCancelText(t)) { drafts.delete(mine.id); media.delete(mine.id); persist(); return wa.sendText(msg.from, `${mine.id}를 취소했어요.`); }
       if (isPrepaidText(t) && t.length <= 12) { mine.prepaid = true; return route(mine); }
       return correct(mine, t, false);
     }
