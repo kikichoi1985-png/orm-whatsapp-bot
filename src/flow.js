@@ -102,9 +102,18 @@ export function createBot({
     return { rate: null, source: '네이버 환율 조회 실패 — HKD 금액 확인 필요', warn: true };
   }
 
-  async function runExtraction(d) {
+  async function runExtraction(d, given = null) {
     const [vs, cfg] = await Promise.all([vendors(), config()]);
-    const out = await extract({ media: await getMedia(d), sender: d.name, message: d.message, answers: d.answers, vendors: vs });
+    let out = given || await extract({ media: await getMedia(d), sender: d.name, message: d.message, answers: d.answers, vendors: vs, part: d.part || null });
+    // 한 사진에 영수증 여러 장 → 1장 1행: 첫 장은 이 접수로, 나머지는 startDraft에서 따로 접수
+    const many = !given && !d.part && Array.isArray(out.receipts) && out.receipts.length > 1;
+    if (many) {
+      const all = out.receipts.map((r) => ({ readable: true, doc_type: out.doc_type, ...r }));
+      d.split = all.slice(1);
+      d.part = { index: 1, total: all.length, receiptNo: all[0].receipt_no || '', amount: all[0].total };
+      out = all[0];
+    }
+    if (out && out.receipts) { const { receipts, ...rest } = out; out = rest; }
     d.ai = out;
     d.docType = d.forceReceipt ? 'receipt' : (out.doc_type || 'receipt');
     if (out.readable === false) { d.state = 'asking'; return; }
@@ -120,7 +129,9 @@ export function createBot({
           d.slipRow = (nos.length && rows.find(hasNo)) || (d.slip.amount ? findPaidRow(rows, d.slip) : null);
         } catch { d.slipRow = null; }
       }
-      return;
+      // statement: 안의 인보이스가 이미 장부에 있으면 중복이라 새 행 없음, 없으면 일반 증빙처럼 1행 기장
+      if (!(d.docType === 'statement' && !d.slipRow)) return;
+      d.state = 'reading'; d.slip = undefined;
     }
     const items = Array.isArray(out.items) ? out.items : [];
     Object.assign(d, {
@@ -227,8 +238,6 @@ export function createBot({
       if (d.docType === 'statement' && d.slipRow) {
         const r = d.slipRow;
         next = `이 statement의 인보이스는 이미 장부에 있어요: ${r.tab} ${r.no} (${r.vendor}, HKD ${fmtMoney(r.hkd)}). statement는 새 매입으로 넣지 않아요.\n그래도 새로 넣어야 하면 "등록"이라고 보내 주세요.`;
-      } else if (d.docType === 'statement') {
-        next = 'statement는 새 매입으로 넣지 않는 게 원칙이에요. 각 인보이스를 보내 주시거나, 이 statement 자체로 기장해야 하면 "등록"이라고 보내 주세요.';
       } else if (d.docType === 'payment_slip' && d.slipRow) {
         const r = d.slipRow;
         next = `장부에 이미 같은 금액 건이 있어요: ${r.tab} ${r.no} (${r.vendor}, HKD ${fmtMoney(r.hkd)}). 그 건의 지급 확인이면 새로 넣지 않아도 돼요.\n선지불 입금 완료라면 "${r.no} 입금완료", 다른 지출이라 새로 넣어야 하면 "등록"이라고 보내 주세요.`;
@@ -267,7 +276,22 @@ export function createBot({
     drafts.set(d.id, d); latest.set(d.phone, d.id);
     await wa.sendText(d.phone, '받았어요. 읽는 중이에요…');
     await runExtraction(d);
+    const rest = d.split || [];
+    delete d.split;
+    if (rest.length) {
+      const n = rest.length + 1;
+      await wa.sendText(d.phone, `사진에 영수증이 ${n}장 있어서 ${n}건으로 나눠 접수했어요 (영수증 1장 = 장부 1행).`);
+    }
     await route(d);
+    for (let i = 0; i < rest.length; i++) {
+      const r = rest[i];
+      const sib = { ...d, id: newId(), v: 0, answers: [], firstSnapshot: undefined, flags: undefined, dup: null, state: 'reading', createdAt: Date.now(),
+        part: { index: i + 2, total: rest.length + 1, receiptNo: r.receipt_no || '', amount: r.total } };
+      if (media.has(d.id)) media.set(sib.id, media.get(d.id));
+      drafts.set(sib.id, sib); latest.set(sib.phone, sib.id);
+      await runExtraction(sib, r);
+      await route(sib);
+    }
   }
 
   /** 올린 사람 또는 승인자의 정정 → 다시 판독 후 다시 승인 요청 */

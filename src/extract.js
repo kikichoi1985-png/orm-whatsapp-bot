@@ -32,17 +32,32 @@ const TOOL = {
         },
       },
       notes: { type: 'string', description: '추측한 값이 있으면 짧게 (한국어)' },
+      receipts: {
+        type: 'array',
+        description: '사진·PDF 한 장에 서로 다른 영수증이 2장 이상이면 영수증마다 하나씩(합치지 않음). 1장이면 비운다.',
+        items: {
+          type: 'object',
+          properties: {
+            doc_type: { type: 'string' }, date: { type: 'string' }, vendor: { type: 'string' }, receipt_no: { type: 'string' },
+            currency: { type: 'string' }, total: { type: 'number' }, payment_method: { type: 'string' }, purpose: { type: 'string' },
+            items: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, qty: { type: 'string' }, amount: { type: 'number' }, category: { type: 'string', enum: ['Food', 'Drink', 'Meal', 'Other', 'Unclear'] } }, required: ['name', 'category'] } },
+            notes: { type: 'string' },
+          },
+          required: ['total', 'items'],
+        },
+      },
     },
     required: ['readable', 'items'],
   },
 };
 
-export function buildPrompt({ sender, message, answers = [], vendors = [], today }) {
+export function buildPrompt({ sender, message, answers = [], vendors = [], today, part = null }) {
   const vendorList = vendors.map((v) => `${v.name} (${v.type})`).join(', ') || '없음';
   return `너는 홍콩 F&B 회사 O'rm의 회계 보조다. 직원이 WhatsApp으로 보낸 영수증/인보이스(첨부)와 메시지를 읽고 장부 입력 후보를 record_receipt 도구로 기록한다.
 
 규칙
-- items에는 품목명과 수량만(가격·설명 제외). amount는 그 품목의 결제금액(영수증 통화 숫자).
+- items에는 품목명과 수량만(가격·설명 제외). 품목명은 영수증에 찍힌 표기 그대로 쓴다(약어도 그대로, 번역·풀이·괄호 설명·'추정' 금지 — 풀이가 필요하면 notes에). amount는 그 품목의 결제금액(영수증 통화 숫자).
+- 한 사진·PDF에 서로 다른 영수증(영수증번호·결제가 따로인 것)이 2장 이상이면 절대 합산하지 않는다. receipts에 영수증마다 하나씩 기록하고, 맨 위 필드에는 첫 번째 영수증을 기록한다.
 - category: Food(가게에서 쓸 식재료·식품을 산 것), Drink(가게에서 쓸 음료·주류·커피/차 원료를 산 것), Meal(식당·카페·바·배달앱에서 사 먹고 마신 음식·음료 — 회식·접대·회의·직원 식대. 식재료 구매가 아님), Other(소모품·포장재·교통·수리·공과금·비품 등), Unclear(판독 불가 또는 무엇인지 모름).
   예: 스타벅스 커피·식당 점심·바 계산서·Keeta 배달 = Meal / 치즈·생선·과일을 마켓에서 구매 = Food / 와인 도매 구매 = Drink.
   품목이 없는 카드 전표·결제 문자라도 가게 이름이 식당·카페·바면 Meal로 둔다.
@@ -58,16 +73,16 @@ export function buildPrompt({ sender, message, answers = [], vendors = [], today
 알려진 거래처(기준정보): ${vendorList}
 올린 사람: ${sender || '(이름 없음)'}
 메시지/캡션: ${message || '(없음)'}
-${answers.length ? '올린 사람의 추가 답변·정정:\n' + answers.map((a) => '- ' + a).join('\n') : ''}`;
+${answers.length ? '올린 사람의 추가 답변·정정:\n' + answers.map((a) => '- ' + a).join('\n') : ''}${part ? `\n\n이 사진에는 영수증이 ${part.total}장 있다. 그중 ${part.index}번째 영수증(영수증번호 ${part.receiptNo || '없음'}, 총액 ${part.amount ?? '?'})만 기록하고 receipts는 비운다.` : ''}`;
 }
 
 export function createExtractor({ apiKey, model }) {
   const client = new Anthropic({ apiKey });
-  return async function extract({ media, sender, message, answers, vendors }) {
+  return async function extract({ media, sender, message, answers, vendors, part }) {
     const fileBlock = media.mimeType === 'application/pdf'
       ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: media.base64 } }
       : { type: 'image', source: { type: 'base64', media_type: media.mimeType, data: media.base64 } };
-    const prompt = buildPrompt({ sender, message, answers, vendors, today: new Date().toISOString().slice(0, 10) })
+    const prompt = buildPrompt({ sender, message, answers, vendors, part, today: new Date().toISOString().slice(0, 10) })
       + '\n\n반드시 record_receipt 도구를 한 번 호출해서 결과를 기록하라. 도구 호출 외의 설명은 쓰지 않는다.';
     const call = (toolChoice) => client.messages.create({
       model,
