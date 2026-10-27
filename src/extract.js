@@ -32,6 +32,7 @@ const TOOL = {
         },
       },
       notes: { type: 'string', description: '추측한 값이 있으면 짧게 (한국어)' },
+      mismatch: { type: 'string', description: '같은 구매의 첨부끼리 금액이 맞지 않으면 무엇이 얼마나 다른지 짧게(한국어). 맞으면 빈 문자열' },
       receipts: {
         type: 'array',
         description: '사진·PDF 한 장에 서로 다른 영수증이 2장 이상이면 영수증마다 하나씩(합치지 않음). 1장이면 비운다.',
@@ -63,11 +64,13 @@ export function buildPrompt({ sender, message, answers = [], vendors = [], today
   품목이 없는 카드 전표·결제 문자라도 가게 이름이 식당·카페·바면 Meal로 둔다.
 - 영수증이 아니거나 날짜·거래처·총액 중 하나라도 읽을 수 없으면 readable=false, question에 질문을 쓴다. 올린 사람의 추가 답변·정정이 있으면 반드시 그대로 반영한다(답변이 우선).
 - 연도가 없으면 오늘(${today}) 기준으로 가장 최근 날짜로 본다.
+- 월별 거래명세서(Statement)는 doc_type=statement. total은 그 기간에 새로 생긴 구매액(Current Month·당월 인보이스 합계)이고, 이월 잔액(B/F·Opening)·최종 잔액(Balance)·입금액은 넣지 않는다. date는 기간 마지막 날. receipt_no는 statement 번호가 있으면 그 번호, 없으면 '<거래처 짧은 이름> YYYY-MM Statement'. items는 'YYYY-MM Statement (인보이스 N건)' 한 줄(category Unclear)로 하고, 인보이스 번호들은 related_no에 쉼표로 적는다.
 - Credit Note는 doc_type=credit_note, total은 차감 금액(양수), related_no에 원래 인보이스 번호.
 - 가격표·견적·상품 사진·결제 전 장바구니처럼 거래 증빙이 아니면 doc_type=other로 표시하고 notes에 무엇인지 쓴다.
 - 은행 송금·이체 확인 화면은 doc_type=payment_slip(금액·날짜·받는 사람은 채운다).
 - 카드 결제 알림 문자·카드 전표·주문 완료 화면은 가게에서 결제한 기록이므로 doc_type=receipt로 본다.
 - 품목을 증빙에서 알 수 없으면 메시지의 설명으로 items를 채운다(예: "MS 이벤트 극세사 린넨 / refractometer"). 메시지에도 무엇을 샀는지 설명이 없으면 readable=false로 하고 무엇을 샀는지(품목·용도)를 묻는다. 품목을 추측해 만들지 않는다.
+- 첨부가 여러 개면 같은 직원이 연달아 보낸 것이다. 같은 구매의 증빙끼리(예: 타오바오 장바구니·주문 화면 + 은행 카드 결제 문자)는 하나로 합쳐 기록한다: 품목·수량은 주문 화면에서, 날짜·결제 금액·통화는 실제 결제 증빙(카드 문자·영수증)에서 가져온다. 주문 화면의 금액은 notes에 원래 통화 그대로 적는다. 두 금액이 환율을 감안해도 맞지 않으면 mismatch에 적는다. 서로 다른 구매면 receipts에 따로 기록한다.
 - 신분증·여권·은행 계좌 화면 등 개인정보 문서면 doc_type=other로 하고, 이름·번호 등 개인정보는 어떤 칸에도 옮겨 적지 않는다(notes에는 "신분증" 같은 종류만).
 
 알려진 거래처(기준정보): ${vendorList}
@@ -79,9 +82,11 @@ ${answers.length ? '올린 사람의 추가 답변·정정:\n' + answers.map((a)
 export function createExtractor({ apiKey, model }) {
   const client = new Anthropic({ apiKey });
   return async function extract({ media, sender, message, answers, vendors, part }) {
-    const fileBlock = media.mimeType === 'application/pdf'
-      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: media.base64 } }
-      : { type: 'image', source: { type: 'base64', media_type: media.mimeType, data: media.base64 } };
+    const files = Array.isArray(media) ? media : [media];
+    const toBlock = (m) => (m.mimeType === 'application/pdf'
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: m.base64 } }
+      : { type: 'image', source: { type: 'base64', media_type: m.mimeType, data: m.base64 } });
+    const fileBlocks = files.map(toBlock);
     const prompt = buildPrompt({ sender, message, answers, vendors, part, today: new Date().toISOString().slice(0, 10) })
       + '\n\n반드시 record_receipt 도구를 한 번 호출해서 결과를 기록하라. 도구 호출 외의 설명은 쓰지 않는다.';
     const call = (toolChoice) => client.messages.create({
@@ -89,7 +94,7 @@ export function createExtractor({ apiKey, model }) {
       max_tokens: 4000,
       tools: [TOOL],
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
-      messages: [{ role: 'user', content: [fileBlock, { type: 'text', text: prompt }] }],
+      messages: [{ role: 'user', content: [...fileBlocks, { type: 'text', text: prompt + (files.length > 1 ? `\n\n첨부 ${files.length}개를 함께 보고 판단하라.` : '') }] }],
     });
     let res;
     try {

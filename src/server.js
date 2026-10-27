@@ -31,6 +31,7 @@ if (!missing.length && sheets) {
     approvers: list(env.APPROVER_NUMBERS),
     approvalTemplate: env.APPROVAL_TEMPLATE || '',
     templateLang: env.APPROVAL_TEMPLATE_LANG || 'ko',
+    batchMs: Number(env.BATCH_WINDOW_MS ?? 8000),
   });
 }
 

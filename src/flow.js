@@ -30,7 +30,7 @@ const HELP_APPROVER = [
 
 export function createBot({
   wa, extract, sheets, fx = null, allowed = [], approvers = [], approvalTemplate = '', templateLang = 'ko',
-  log = console, persistDelayMs = 1500,
+  log = console, persistDelayMs = 1500, batchMs = 0,
 }) {
   const drafts = new Map();     // id -> draft
   const latest = new Map();     // 올린 사람 phone -> 최근 draftId
@@ -86,8 +86,13 @@ export function createBot({
   }
 
   // ---------- 판독 ----------
+  /** 첨부 내려받기. 연달아 보낸 사진 묶음이면 배열로 돌려준다 */
   async function getMedia(d) {
-    if (!media.has(d.id)) media.set(d.id, await wa.downloadMedia(d.mediaId));
+    if (!media.has(d.id)) {
+      const ids = d.mediaIds?.length ? d.mediaIds : [d.mediaId];
+      const files = await Promise.all(ids.map((id) => wa.downloadMedia(id)));
+      media.set(d.id, files.length === 1 ? files[0] : files);
+    }
     return media.get(d.id);
   }
 
@@ -135,7 +140,7 @@ export function createBot({
     }
     const items = Array.isArray(out.items) ? out.items : [];
     Object.assign(d, {
-      date: out.date || '', vendor: out.vendor || '', receiptNo: out.receipt_no || '', relatedNo: out.related_no || '',
+      date: out.date || '', vendor: out.vendor || '', receiptNo: String(out.receipt_no || '').replace(/^["'\s]+|["'\s]+$/g, ''), relatedNo: out.related_no || '',
       items, details: detailsText(items), currency: String(out.currency || 'HKD').trim().toUpperCase(),
       amount: Number(out.total) || 0, notes: out.notes || '', purpose: out.purpose || '',
     });
@@ -167,6 +172,7 @@ export function createBot({
       d.dup?.kind === 'credit_note' && d.dup.row ? `Credit Note → 승인하면 원본 ${d.dup.row.tab} ${d.dup.row.no} 행 금액을 차감해 수정해요` : null,
       d.dup?.kind === 'credit_note' && !d.dup.row ? `Credit Note인데 원본 인보이스(${d.relatedNo || '번호 없음'})를 장부에서 못 찾았어요` : null,
       d.dupError ? '장부 중복 확인을 못 했어요' : null,
+      d.ai?.mismatch ? `증빙끼리 금액이 달라요: ${d.ai.mismatch}` : null,
       !d.receiptNo ? `영수증 번호 없음 → 저장 시 내부 번호(${d.category === 'Expenses' ? 'Basic_번호' : d.category === 'Purchase_Drink' ? 'YYYY PURD (번호)' : 'YYYY PURF (번호)'})로 입력` : null,
     ].filter(Boolean);
     if (!d.firstSnapshot) d.firstSnapshot = snapshot(d);
@@ -261,20 +267,22 @@ export function createBot({
   }
 
   // ---------- 접수 ----------
-  async function startDraft(msg, who) {
-    if (!SUPPORTED_MIME.includes((msg.mimeType || '').split(';')[0])) {
-      await wa.sendText(msg.from, '사진(JPG/PNG) 또는 PDF로 보내 주세요.');
-      return;
-    }
+  async function startDraft(input, who) {
+    const all = Array.isArray(input) ? input : [input];
+    const msgs = all.filter((m) => SUPPORTED_MIME.includes((m.mimeType || '').split(';')[0]));
+    if (msgs.length < all.length) await wa.sendText(all[0].from, '사진(JPG/PNG) 또는 PDF로 보내 주세요.');
+    if (!msgs.length) return;
+    const msg = msgs[0];
     const cfg = await config();
     const d = {
-      id: newId(), v: 0, phone: msg.from, name: who.name, message: msg.text || '', answers: [], mediaId: msg.mediaId,
-      prepaid: isPrepaidText(msg.text) || (Date.now() - (prepaidHint.get(msg.from) || 0) < 5 * 60e3),
+      id: newId(), v: 0, phone: msg.from, name: who.name, message: msgs.map((m) => m.text).filter(Boolean).join(' / '), answers: [], mediaId: msg.mediaId,
+      ...(msgs.length > 1 ? { mediaIds: msgs.map((m) => m.mediaId) } : {}),
+      prepaid: msgs.some((m) => isPrepaidText(m.text)) || (Date.now() - (prepaidHint.get(msg.from) || 0) < 5 * 60e3),
       refTpl: cfg.REF_PREPAID || DEFAULT_REF.prepaid, createdAt: Date.now(), sourceMessageId: msg.id, state: 'reading',
     };
     prepaidHint.delete(msg.from);
     drafts.set(d.id, d); latest.set(d.phone, d.id);
-    await wa.sendText(d.phone, '받았어요. 읽는 중이에요…');
+    await wa.sendText(d.phone, msgs.length > 1 ? `사진 ${msgs.length}장을 받았어요. 함께 읽는 중이에요…` : '받았어요. 읽는 중이에요…');
     await runExtraction(d);
     const rest = d.split || [];
     delete d.split;
@@ -497,13 +505,35 @@ export function createBot({
         if (!msg.mediaId && !msg.replyId && !isPaidText(msg.text)) return;
       }
       if (msg.replyId) return await handleReply(msg, who, isApprover);
-      if (msg.mediaId) return isPaidText(msg.text) ? await handlePaid(msg, who, isApprover) : await startDraft(msg, who);
+      if (msg.mediaId) {
+        if (isPaidText(msg.text)) return await handlePaid(msg, who, isApprover);
+        if (batchMs > 0) return collect(msg, who);
+        return await startDraft(msg, who);
+      }
       if (msg.type === 'text' || msg.type === 'button') return await handleText(msg, who, isApprover);
       await wa.sendText(msg.from, '사진, PDF, 글자 메시지만 처리할 수 있어요. 음성 메시지는 아직 지원하지 않아요.');
     } catch (e) {
       log.error?.('처리 실패', msg.id, e);
       await wa.sendText(msg.from, '처리 중 문제가 생겼어요. 잠시 후 다시 보내 주세요.').catch(() => {});
     }
+  }
+
+  // 연달아 보낸 사진(예: 장바구니 화면 + 카드 결제 문자)은 batchMs 동안 모아 한 번에 읽는다
+  const albums = new Map();
+  function collect(msg, who) {
+    const a = albums.get(msg.from) || { msgs: [], who };
+    a.msgs.push(msg);
+    clearTimeout(a.timer);
+    a.timer = setTimeout(() => {
+      albums.delete(msg.from);
+      const prev = queues.get(msg.from) || Promise.resolve();
+      const next = prev.then(() => startDraft(a.msgs, a.who)).catch(async (e) => {
+        log.error?.('묶음 처리 실패', e);
+        await wa.sendText(msg.from, '처리 중 문제가 생겼어요. 잠시 후 다시 보내 주세요.').catch(() => {});
+      });
+      queues.set(msg.from, next);
+    }, a.msgs.length >= 10 ? 0 : batchMs);
+    albums.set(msg.from, a);
   }
 
   /** 웹훅 메시지 1건 처리. 중복 제거 + 발신자별 순차 처리. */
