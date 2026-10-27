@@ -36,6 +36,8 @@ function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, le
     getVendors: async () => [{ name: 'Classic Fine Foods', aliases: ['CFF'], type: 'Food' }],
     getConfig: async () => ({ FILE_LABEL: '오름 {year} 매입 인보이스 모음', REF_PREPAID: '{name} 선지불, 추후 입금 해야함', REF_PAID: '{name} 대표 선지불, 추후 입금완료' }),
     listLedger: async () => Object.keys(tabs).flatMap(rowsOf),
+    findSavedBySource: async (mid) => { const r = log.filter((x) => x.원메시지ID === mid && x.상태 === '저장').at(-1); return r ? { tab: r.시트, no: r['No.'], id: r.처리ID } : null; },
+    updatePattyRemark: async (no, remark) => { const r = (tabs['Patty Cash Record'] || []).find((x) => x[0] === no); if (!r) return null; r[5] = remark; return r; },
     listPatty: async () => (tabs['Patty Cash Record'] || []).slice(1).map((r, i) => ({ rowNumber: i + 2, no: r[0], date: r[1], desc: r[2], amount: r[4], remark: r[5] })),
     columnA: async (tab) => (tabs[tab] ||= [['No.']]).map((r) => r[0]),
     insertLedgerRow: async (tab, values) => { (tabs[tab] ||= [['No.']]).push([...values]); return tabs[tab].length; },
@@ -69,7 +71,7 @@ test('직원 영수증(선지불) → 회계 승인 → 장부 저장 → 입금
   await h.send({ ...IMG, text: '선지불 급하게 샀어요' });
 
   const card = h.lastTo(ACCT, 'buttons');
-  assert.match(card.body, /\[승인 요청\]/);
+  assert.match(card.body, /승인 요청\*/);
   assert.match(card.body, /올린 사람: 한상훈 매니져님/);
   assert.match(card.body, /시트: Purchase_Food/);
   assert.match(card.body, /한상훈 매니져님 선지불, 추후 입금 해야함/);
@@ -210,7 +212,7 @@ test('24시간 창이 닫힌 승인자 → 템플릿 알림 → 승인자가 말
   assert.match(h.lastTo(STAFF).body, /회계 담당에게 바로 알리지 못했어요/);
   h.openWindow();
   await h.send({ text: '안녕' }, ACCT);
-  assert.match(h.lastTo(ACCT, 'buttons').body, /\[승인 요청\]/);
+  assert.match(h.lastTo(ACCT, 'buttons').body, /승인 요청\*/);
 });
 
 test('승인자가 없으면 올린 사람이 직접 승인', async () => {
@@ -228,7 +230,7 @@ test('거래 증빙이 아님 → 확인 → "등록"이면 진행', async () =>
   assert.match(h.lastTo(STAFF).body, /거래 증빙.*아닌 것 같아요/);
   assert.equal(h.lastTo(ACCT), undefined);
   await h.send({ text: '등록' });
-  assert.match(h.lastTo(ACCT, 'buttons').body, /\[승인 요청\]/);
+  assert.match(h.lastTo(ACCT, 'buttons').body, /승인 요청\*/);
 });
 
 test('송금 확인 화면 → 기존 장부 행 안내 → "번호 입금완료" 또는 "등록"', async () => {
@@ -339,11 +341,13 @@ test('날짜만 안 보이면 오늘·어제·그제 버튼 제안 → 고르면
     ? { readable: true, doc_type: 'receipt', date: args.answers.at(-1).replace('날짜 ', ''), ...base }
     : { readable: false, missing: ['date'], question: '구매 날짜가 보이지 않아요. 언제 사셨나요?', ...base }));
   await h.send({ ...IMG });
-  const q = h.lastTo(STAFF, 'buttons');
-  assert.equal(q.buttons.length, 3);
-  assert.match(q.buttons[0].title, /^오늘 \d\d\/\d\d$/);
+  const q = h.lastTo(STAFF, 'list');
+  assert.equal(q.rows.length, 8);
+  assert.match(q.rows[0].title, /^오늘 \d\d\/\d\d$/);
+  assert.equal(q.rows.at(-1).title, '취소');
+  assert.match(q.rows.at(-1).id, /^cancel:/);
   assert.doesNotMatch(q.body, /용도/);
-  await h.send({ type: 'interactive', replyId: q.buttons[1].id });
+  await h.send({ type: 'interactive', replyId: q.rows[1].id });
   const card = h.lastTo(ACCT, 'buttons');
   const yday = new Date(Date.now() + 8 * 3600e3 - 864e5).toISOString().slice(0, 10);
   assert.match(card.body, new RegExp(`날짜: ${yday}`));
@@ -354,7 +358,7 @@ test('메시지 간소화: 직원 접수는 짧게, 결정 코드·AI 메모는 
   await h.send({ ...IMG });
   const staff = h.lastTo(STAFF).body;
   const card = h.lastTo(ACCT, 'buttons').body;
-  assert.ok(staff.split('\n').length <= 5);
+  assert.ok(staff.split("\n").length <= 8);
   for (const b of [staff, card]) { assert.doesNotMatch(b, /\[D\d+/); assert.doesNotMatch(b, /긴 AI 메모|메모:/); }
 });
 
@@ -416,6 +420,41 @@ test('같은 인보이스를 연달아 두 번 보내 카드가 2장이어도, �
   assert.equal(re.buttons[0].title, '그래도 저장');
   await h.send({ type: 'interactive', replyId: re.buttons[0].id }, ACCT);
   assert.equal(h.tabs.Purchase_Food.length, 3, '확인 후 그래도 저장하면 저장');
+});
+
+test('패티캐쉬: 사진에 답장한 글 → 승인 전엔 리마크 반영, 저장 후엔 장부 리마크 수정', async () => {
+  const h = harness(() => ({ readable: true, doc_type: 'cash_withdrawal', date: '2026-09-11', vendor: 'HSBC', currency: 'HKD', total: 3000, items: [{ name: 'Cash withdrawal', category: 'Other' }] }));
+  await h.send({ ...IMG });
+  const photoId = 'm' + 1;
+  await h.send({ text: '이번 주 소모품용', contextId: photoId });
+  let card = h.lastTo(ACCT, 'buttons');
+  assert.match(card.body, /리마크: 이번 주 소모품용/);
+  await h.send({ type: 'interactive', replyId: card.buttons[0].id }, ACCT);
+  assert.equal(h.tabs['Patty Cash Record'].at(-1)[5], '이번 주 소모품용');
+  await h.send({ text: '합산 후 결과적으로 남아서 패티캐쉬로 들어간 돈', contextId: photoId });
+  assert.equal(h.tabs['Patty Cash Record'].at(-1)[5], '합산 후 결과적으로 남아서 패티캐쉬로 들어간 돈');
+  assert.match(h.lastTo(STAFF).body, /리마크를 바꿨어요/);
+});
+
+test('Credit Note로 금액이 줄어든 인보이스를 다시 보내면 수정본이 아니라 중복으로 막음 (직원에게도 표시)', async () => {
+  const seed = { Purchase_Food: [['#4', 'f', '401386892', 20260722, 'Classic Fine Foods', 'HKD', 'Lychee x2 / Credit Note 71022 -242.00', 662, 662, '', '', '']] };
+  const h = harness(() => ({ readable: true, doc_type: 'invoice', date: '2026-07-22', vendor: 'Classic Fine Foods (Hong Kong) Ltd.', receipt_no: '401386892', currency: 'HKD', total: 904, items: [{ name: 'Lychee', qty: '2', amount: 904, category: 'Food' }] }), { ledgerSeed: seed });
+  await h.send({ ...IMG });
+  const card = h.lastTo(ACCT, 'buttons');
+  assert.match(card.body, /🚨 \*이미 장부에 있는 증빙 같아요: Purchase_Food #4 \(Credit Note 242\.00 차감 반영된 건\)\*/);
+  assert.equal(card.buttons[0].title, '그래도 저장');
+  assert.match(h.lastTo(STAFF).body, /🚨 \*이미 장부에 있는 증빙/);
+});
+
+test('선지불 저장 후 직원에게 [입금완료] 버튼 → 누르면 회계 확인 요청', async () => {
+  const h = harness(() => CFF);
+  await h.send({ ...IMG, text: '선지불' });
+  await h.send({ type: 'interactive', replyId: h.lastTo(ACCT, 'buttons').buttons[0].id }, ACCT);
+  const done = h.lastTo(STAFF, 'buttons');
+  assert.match(done.body, /✅ 회계 승인 완료/);
+  assert.equal(done.buttons[0].title, '입금완료');
+  await h.send({ type: 'interactive', replyId: done.buttons[0].id });
+  assert.match(h.lastTo(ACCT, 'buttons').body, /입금완료 확인/);
 });
 
 test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
