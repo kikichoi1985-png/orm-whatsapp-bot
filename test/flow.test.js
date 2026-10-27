@@ -457,6 +457,19 @@ test('선지불 저장 후 직원에게 [입금완료] 버튼 → 누르면 회�
   assert.match(h.lastTo(ACCT, 'buttons').body, /입금완료 확인/);
 });
 
+test('직원 접수 메시지에 [취소] → 누르면 접수 취소되고 회계 담당에게 알림, 옛 승인 카드는 무효', async () => {
+  const h = harness(() => CFF);
+  await h.send({ ...IMG });
+  const card = h.lastTo(ACCT, 'buttons');
+  const mine = h.lastTo(STAFF, 'buttons');
+  assert.equal(mine.buttons[0].title, '취소');
+  await h.send({ type: 'interactive', replyId: mine.buttons[0].id });
+  assert.match(h.lastTo(STAFF).body, /취소했어요/);
+  assert.match(h.lastTo(ACCT).body, /올린 사람이 취소했어요/);
+  await h.send({ type: 'interactive', replyId: card.buttons[0].id }, ACCT);
+  assert.equal(h.tabs.Purchase_Food.length, 1);
+});
+
 test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
   const h = harness(() => CFF);
   await h.bot.handle({ id: 'z', from: '85299999999', name: '?', type: 'text', text: '도움말' });
