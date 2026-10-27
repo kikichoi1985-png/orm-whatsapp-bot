@@ -223,4 +223,7 @@ export const fmtMoney = (n) =>
 /** 홍콩 기준 현재 연도·시각 */
 export const hkNow = () => new Date(Date.now() + 8 * 3600 * 1000);
 export const hkYear = () => hkNow().getUTCFullYear();
+/** 시각(ms) → 홍콩 날짜 YYYYMMDD 숫자 (장부 날짜 형식) */
+export const hkDateNumber = (ms) => Number(new Date(Number(ms) + 8 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, ''));
+export const fmtYmd = (n) => String(n).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3');
 export const hkStamp = () => hkNow().toISOString().slice(0, 16).replace('T', ' ');

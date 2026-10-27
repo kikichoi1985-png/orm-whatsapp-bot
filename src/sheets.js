@@ -31,6 +31,7 @@ const TAB_DEFAULTS = {
     ['FILE_LABEL', '1.오름 통합 영수증/인보이스 파일 모음 => 오름 {year} 매입 인보이스 모음', '장부 B열(파일명/폴더)에 넣을 값. {year}는 올해'],
     ['REF_PREPAID', '{name} 선지불, 추후 입금 해야함', '선지불 영수증 저장 시 REF (D11)'],
     ['REF_PAID', '{name} 대표 선지불, 추후 입금완료', '입금완료 반영 시 REF (D11)'],
+    ['PAYMENT_ACCOUNT_DEFAULT', '', '입금완료 반영 시 장부 K열(사용된 계좌)에 넣을 기본 계좌. 비워 두면 K열은 그대로'],
   ],
   AI_Log: [LOG_HEADERS],
   _Pending: [['처리ID', '데이터(JSON) — 서버 재시작 후 승인 대기 건 복구용. 직접 수정하지 마세요']],
@@ -61,6 +62,12 @@ export function createSheetsStore({ sheetId, serviceAccountJson, cacheMs = 60_00
     const add = Object.keys(want).filter((t) => !(t in tabIds));
     // AI_Log 머리글은 코드가 관리 — 열이 추가돼도 기존 탭 머리글을 맞춘다
     if ('AI_Log' in tabIds) await api.values.update({ spreadsheetId: sheetId, range: 'AI_Log!A1', valueInputOption: 'RAW', requestBody: { values: [LOG_HEADERS] } });
+    // Config에 새로 생긴 키는 기존 탭 아래에 덧붙인다(값은 비워 둠)
+    if ('Config' in tabIds) {
+      const have = new Set((await get('Config!A2:A')).map((r) => String(r[0] || '').trim()));
+      const miss = TAB_DEFAULTS.Config.slice(1).filter((r) => !have.has(r[0]));
+      if (miss.length) await api.values.append({ spreadsheetId: sheetId, range: 'Config!A:C', valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: miss } });
+    }
     if (!add.length) return [];
     await api.batchUpdate({ spreadsheetId: sheetId, requestBody: { requests: add.map((title) => ({ addSheet: { properties: { title, gridProperties: { frozenRowCount: 1 } } } })) } });
     for (const t of add) await api.values.update({ spreadsheetId: sheetId, range: `${q(t)}!A1`, valueInputOption: 'RAW', requestBody: { values: want[t] } });
@@ -143,6 +150,16 @@ export function createSheetsStore({ sheetId, serviceAccountJson, cacheMs = 60_00
 
     async updateRef(tab, rowNumber, ref) {
       await api.values.update({ spreadsheetId: sheetId, range: `${q(tab)}!L${rowNumber}`, valueInputOption: 'RAW', requestBody: { values: [[ref]] } });
+    },
+
+    /** 입금완료 반영: J(지급일)·L(REF), 계좌가 있으면 K(사용된 계좌)도 */
+    async updatePaid(tab, rowNumber, { paidDate, account, ref }) {
+      const data = [
+        { range: `${q(tab)}!J${rowNumber}`, values: [[paidDate]] },
+        { range: `${q(tab)}!L${rowNumber}`, values: [[ref]] },
+        ...(account ? [{ range: `${q(tab)}!K${rowNumber}`, values: [[account]] }] : []),
+      ];
+      await api.values.batchUpdate({ spreadsheetId: sheetId, requestBody: { valueInputOption: 'RAW', data } });
     },
 
     async appendLog(obj) {
