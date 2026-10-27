@@ -8,6 +8,11 @@ import { parseDailyQuote } from '../src/fx.js';
 
 const V = [{ name: 'Classic Fine Foods', aliases: ['CFF'], type: 'Food' }];
 
+test('할인 줄(음수 금액)은 금액 못 읽음이 아니라 차감으로 처리', () => {
+  const r = classify([{ name: 'a', amount: 51, category: 'Food' }, { name: 'b', amount: 38, category: 'Food' }, { name: '特價', amount: -6, category: 'Food' }, { name: '膠袋', amount: 1, category: 'Other' }], 'x', V);
+  assert.equal(r.category, 'Purchase_Food'); assert.equal(r.needsReview, false); assert.match(r.reason, /Food 83/);
+});
+
 test('D10 분류: 명확·불명확·혼합·동률·금액 누락', () => {
   assert.equal(classify([{ name: 'Butter', amount: 10, category: 'Food' }], 'x', V).category, 'Purchase_Food');
   assert.equal(classify([{ name: 'Wine', amount: 10, category: 'Drink' }], 'x', V).category, 'Purchase_Drink');

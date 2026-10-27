@@ -36,8 +36,9 @@ function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, le
     getVendors: async () => [{ name: 'Classic Fine Foods', aliases: ['CFF'], type: 'Food' }],
     getConfig: async () => ({ FILE_LABEL: '오름 {year} 매입 인보이스 모음', REF_PREPAID: '{name} 선지불, 추후 입금 해야함', REF_PAID: '{name} 대표 선지불, 추후 입금완료' }),
     listLedger: async () => Object.keys(tabs).flatMap(rowsOf),
-    columnA: async (tab) => tabs[tab].map((r) => r[0]),
-    insertLedgerRow: async (tab, values) => { tabs[tab].push([...values]); return tabs[tab].length; },
+    listPatty: async () => (tabs['Patty Cash Record'] || []).slice(1).map((r, i) => ({ rowNumber: i + 2, no: r[0], date: r[1], desc: r[2], amount: r[4], remark: r[5] })),
+    columnA: async (tab) => (tabs[tab] ||= [['No.']]).map((r) => r[0]),
+    insertLedgerRow: async (tab, values) => { (tabs[tab] ||= [['No.']]).push([...values]); return tabs[tab].length; },
     updateLedgerRow: async (tab, rowNumber, vals) => { tabs[tab][rowNumber - 1] = [tabs[tab][rowNumber - 1][0], ...vals]; },
     updateRef: async (tab, rowNumber, ref) => { tabs[tab][rowNumber - 1][11] = ref; },
     updatePaid: async (tab, rowNumber, { paidDate, account, ref }) => { const r = tabs[tab][rowNumber - 1]; r[9] = paidDate; if (account) r[10] = account; r[11] = ref; },
@@ -346,6 +347,75 @@ test('날짜만 안 보이면 오늘·어제·그제 버튼 제안 → 고르면
   const card = h.lastTo(ACCT, 'buttons');
   const yday = new Date(Date.now() + 8 * 3600e3 - 864e5).toISOString().slice(0, 10);
   assert.match(card.body, new RegExp(`날짜: ${yday}`));
+});
+
+test('메시지 간소화: 직원 접수는 짧게, 결정 코드·AI 메모는 보이지 않음', async () => {
+  const h = harness(() => ({ ...CFF, notes: '긴 AI 메모' }));
+  await h.send({ ...IMG });
+  const staff = h.lastTo(STAFF).body;
+  const card = h.lastTo(ACCT, 'buttons').body;
+  assert.ok(staff.split('\n').length <= 5);
+  for (const b of [staff, card]) { assert.doesNotMatch(b, /\[D\d+/); assert.doesNotMatch(b, /긴 AI 메모|메모:/); }
+});
+
+test('질문·증빙 아님 안내에 [취소]·[등록] 버튼, 오타 섞인 취소도 인식', async () => {
+  const { isCancelText } = await import('../src/flow.js');
+  for (const t of ['취소', '취소 ', '취쇼', '취소요', '취소해 줘', 'Cancel', '그만']) assert.ok(isCancelText(t), t);
+  for (const t of ['취소된 건 아니고 날짜 10/20', '총액 1200']) assert.ok(!isCancelText(t), t);
+  const h = harness(() => ({ readable: false, question: '무엇을 사셨나요?', items: [] }));
+  await h.send({ ...IMG });
+  const q = h.lastTo(STAFF, 'buttons');
+  assert.equal(q.buttons[0].title, '취소');
+  await h.send({ type: 'interactive', replyId: q.buttons[0].id });
+  assert.match(h.lastTo(STAFF).body, /취소했어요/);
+  const h2 = harness(() => ({ readable: true, doc_type: 'other', items: [], notes: '광고' }));
+  await h2.send({ ...IMG });
+  assert.deepEqual(h2.lastTo(STAFF, 'buttons').buttons.map((b) => b.title), ['등록', '취소']);
+  await h2.send({ text: '취쇼' });
+  assert.match(h2.lastTo(STAFF).body, /취소했어요/);
+});
+
+test('은행 현금 인출 통지서 여러 장 → Patty Cash Record에 장마다 1행, 리마크는 올린 사람 글', async () => {
+  const w = (time, amt, hw = '') => ({ doc_type: 'cash_withdrawal', date: '2026-07-31', vendor: 'HSBC', currency: 'HKD', total: amt, items: [{ name: 'Cash withdrawal', category: 'Other' }], handwritten: hw });
+  const slips = [w('23:10', 20000), w('23:09', 400, '400 지우고 1500, Carlos, 2026 07 Bonus')];
+  const h = harness(() => ({ readable: true, ...slips[0], receipts: slips }));
+  await h.send({ ...IMG, text: '7월 보너스 현금' });
+  const cards = h.sent.filter((s) => s.to === ACCT && s.kind === 'buttons');
+  assert.equal(cards.length, 2);
+  assert.match(cards[0].body, /Patty Cash Record/);
+  assert.match(cards[0].body, /캐쉬인: HKD 20,000\.00/);
+  assert.match(cards[0].body, /리마크: 7월 보너스 현금/);
+  assert.match(cards[1].body, /손글씨 메모/);
+  // 두 번째 장: 손글씨대로 금액 정정 + 리마크 변경 (다시 읽지 않음)
+  await h.send({ text: '총액 1500' }, ACCT);
+  await h.send({ text: '리마크 Carlos 2026 07 Bonus' }, ACCT);
+  assert.equal(h.calls.length, 1);
+  const last = h.lastTo(ACCT, 'buttons');
+  assert.match(last.body, /캐쉬인: HKD 1,500\.00/);
+  assert.match(last.body, /리마크: Carlos 2026 07 Bonus/);
+  await h.send({ type: 'interactive', replyId: cards[0].buttons[0].id }, ACCT);
+  await h.send({ type: 'interactive', replyId: last.buttons[0].id }, ACCT);
+  assert.deepEqual(h.tabs['Patty Cash Record'].slice(1), [
+    ['#1', '2026-07-31', 'Cash Withdrawal for patty cash', '', 20000, '7월 보너스 현금'],
+    ['#2', '2026-07-31', 'Cash Withdrawal for patty cash', '', 1500, 'Carlos 2026 07 Bonus'],
+  ]);
+  assert.equal(h.tabs['Expenses (SG&A)'].length, 1, '경비 장부에는 안 들어감');
+});
+
+test('같은 인보이스를 연달아 두 번 보내 카드가 2장이어도, 두 번째 승인 때 중복을 다시 확인해 막음', async () => {
+  const h = harness(() => CFF);
+  await h.send({ ...IMG });
+  await h.send({ ...IMG, mediaId: 'again' });
+  const cards = h.sent.filter((s) => s.to === ACCT && s.kind === 'buttons');
+  assert.equal(cards.length, 2);
+  await h.send({ type: 'interactive', replyId: cards[0].buttons[0].id }, ACCT);
+  await h.send({ type: 'interactive', replyId: cards[1].buttons[0].id }, ACCT);
+  assert.equal(h.tabs.Purchase_Food.length, 2, '한 번만 저장');
+  const re = h.lastTo(ACCT, 'buttons');
+  assert.match(re.body, /이미 장부에 있는 증빙/);
+  assert.equal(re.buttons[0].title, '그래도 저장');
+  await h.send({ type: 'interactive', replyId: re.buttons[0].id }, ACCT);
+  assert.equal(h.tabs.Purchase_Food.length, 3, '확인 후 그래도 저장하면 저장');
 });
 
 test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
