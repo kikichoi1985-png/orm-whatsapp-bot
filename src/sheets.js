@@ -134,6 +134,23 @@ export function createSheetsStore({ sheetId, serviceAccountJson, cacheMs = 60_00
         .filter((r) => r.no.startsWith('#'));
     },
 
+    /** AI_Log에서 원래 메시지 ID로 저장된 건 찾기 (답장으로 리마크 수정용). 가장 최근 '저장' 건 */
+    async findSavedBySource(messageId) {
+      const rows = await get('AI_Log!A2:N');
+      const iTab = LOG_HEADERS.indexOf('시트'), iNo = LOG_HEADERS.indexOf('No.'), iSt = LOG_HEADERS.indexOf('상태'), iSrc = LOG_HEADERS.indexOf('원메시지ID');
+      const hits = rows.filter((r) => r[iSrc] === messageId && r[iSt] === '저장');
+      const r = hits.at(-1);
+      return r ? { tab: r[iTab], no: r[iNo], id: r[0] } : null;
+    },
+
+    /** 패티캐쉬 행의 리마크(F열) 바꾸기 */
+    async updatePattyRemark(no, remark) {
+      const row = (await this.listPatty()).find((r) => r.no === no);
+      if (!row) return null;
+      await api.values.update({ spreadsheetId: sheetId, range: `${q(PATTY_TAB)}!F${row.rowNumber}`, valueInputOption: 'RAW', requestBody: { values: [[remark]] } });
+      return row;
+    },
+
     /** 그 탭 A열 값 (번호 계산용) */
     async columnA(tab) { return (await readTab(tab)).colA; },
 

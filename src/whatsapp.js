@@ -83,6 +83,7 @@ export function parseWebhook(body) {
       const names = Object.fromEntries((v.contacts || []).map((c) => [c.wa_id, c.profile?.name || '']));
       for (const m of v.messages || []) {
         const msg = { id: m.id, from: m.from, name: names[m.from] || '', type: m.type, timestamp: Number(m.timestamp) * 1000 };
+        if (m.context?.id) msg.contextId = m.context.id; // 특정 메시지에 '답장'한 경우 그 원래 메시지 ID
         if (m.type === 'text') msg.text = m.text?.body || '';
         else if (m.type === 'image') Object.assign(msg, { mediaId: m.image?.id, mimeType: m.image?.mime_type, text: m.image?.caption || '' });
         else if (m.type === 'document') Object.assign(msg, { mediaId: m.document?.id, mimeType: m.document?.mime_type, text: m.document?.caption || '', filename: m.document?.filename });

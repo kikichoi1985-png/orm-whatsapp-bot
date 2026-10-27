@@ -166,6 +166,11 @@ export function createBot({
         d.dup = orig ? { kind: 'credit_note', row: orig } : { kind: 'credit_note', row: null };
       } else {
         d.dup = findDuplicate(rows, d);
+        // 같은 번호인데 금액만 다른 '수정본'처럼 보여도, 그 차이가 이미 반영된 Credit Note 차감 때문이면 같은 인보이스 재전송(중복)
+        if (d.dup?.kind === 'revision') {
+          const cn = [...String(d.dup.row.details || '').matchAll(/Credit Note[^/]*?-\s*([\d,]+(?:\.\d+)?)/gi)].reduce((a, m) => a + Number(m[1].replace(/,/g, '')), 0);
+          if (cn > 0 && Math.abs(round2(Number(d.dup.row.amount) + cn) - Number(d.amount)) < 0.01) d.dup = { ...d.dup, kind: 'duplicate', creditNoted: cn };
+        }
       }
     } catch (e) { log.warn?.('장부 대조 실패', e.message); d.dupError = true; }
 
@@ -173,7 +178,7 @@ export function createBot({
       cls.needsReview ? `분류 확인: ${cls.reason}` : null,
       d.hkd == null ? 'HKD 금액을 정할 수 없음 — 답장으로 "HKD 금액"을 알려 주세요' : null,
       fxr.warn ? fxr.source : null,
-      d.dup?.kind === 'duplicate' ? `이미 장부에 있는 증빙 같아요: ${d.dup.row.tab} ${d.dup.row.no}` : null,
+      d.dup?.kind === 'duplicate' ? `이미 장부에 있는 증빙 같아요: ${d.dup.row.tab} ${d.dup.row.no}${d.dup.creditNoted ? ` (Credit Note ${fmtMoney(d.dup.creditNoted)} 차감 반영된 건)` : ''}` : null,
       d.dup?.kind === 'possible_duplicate' ? `번호 없는 증빙 — 같은 날짜·금액 기록이 있어요: ${d.dup.row.tab} ${d.dup.row.no}` : null,
       d.dup?.kind === 'revision' ? `같은 번호의 기존 기록이 있어요(수정본) → 승인하면 ${d.dup.row.tab} ${d.dup.row.no} 행을 수정해요` : null,
       d.dup?.kind === 'credit_note' && d.dup.row ? `Credit Note → 승인하면 원본 ${d.dup.row.tab} ${d.dup.row.no} 행 금액을 차감해 수정해요` : null,
@@ -223,51 +228,55 @@ export function createBot({
   /** 승인 카드 맨 위 경고: WhatsApp은 색을 못 쓰므로 이모지 + *굵게* 로 눈에 띄게 */
   function warnBlock(d) {
     if (!d.flags?.length) return null;
-    const strong = (f) => /이미 장부|같은 날짜·금액|중복|금액이 달라요|기존 행을 수정|차감/.test(f);
+    const strong = (f) => /HKD 금액을 정할 수 없음|이미 장부|같은 날짜·금액|중복|금액이 달라요|행을 수정|수정본|차감|원본 인보이스/.test(f);
     const lines = d.flags.map((f) => (strong(f) ? `🚨 *${plainReason(f)}*` : `ℹ️ ${plainReason(f)}`));
     return `\n${lines.join('\n')}\n`;
   }
 
   function body(d, forApprover) {
+    const head = forApprover ? `📋 *승인 요청* ${d.id}${d.v > 1 ? ` (수정 ${d.v - 1})` : ''}` : `📥 *접수했어요* (${d.id})`;
     if (d.kind === 'patty') {
       return [
-        forApprover ? `[승인 요청] ${d.id}${d.v > 1 ? ` (수정 ${d.v - 1})` : ''}` : `접수했어요 (${d.id})`,
+        head,
         forApprover ? warnBlock(d) : null,
-        forApprover ? `올린 사람: ${d.name}` : null,
-        `시트: ${PATTY_TAB}`,
-        `날짜: ${d.date || '-'}`,
-        `내용: ${d.pattyDesc}`,
-        `캐쉬인: HKD ${fmtMoney(d.amount)}`,
-        `리마크: ${d.remark || '-'}`,
-
+        forApprover ? `👤 올린 사람: ${d.name}` : null,
+        `🗂️ 시트: ${PATTY_TAB}`,
+        `📅 날짜: ${d.date || '-'}`,
+        `🏦 내용: ${d.pattyDesc}`,
+        `💰 캐쉬인: HKD ${fmtMoney(d.amount)}`,
+        `📝 리마크: ${d.remark || '-'}`,
         '',
         forApprover ? '고칠 내용은 답장으로 보내세요 (예: "총액 7470", "리마크 2026 07 Bonus").'
-          : '회계 담당 승인 후 Patty Cash Record에 저장돼요. 리마크를 남기려면 "리마크 내용"으로 답장해 주세요.',
+          : '회계 담당 승인 후 Patty Cash Record에 저장돼요. 리마크는 사진에 답장으로 남기면 돼요.',
       ].filter((x) => x !== null).join('\n');
     }
     const sheet = CATEGORIES[d.category] || '미정 (회계 담당이 고름)';
     if (!forApprover) {
-      // 직원용: 무엇이 접수됐는지만 짧게
+      // 직원용: 무엇이 접수됐는지만 짧게, 항목마다 아이콘
       return [
-        `접수했어요 (${d.id})`,
-        `${d.vendor || '-'} · ${d.date || '-'} · ${moneyLine(d).split('\n')[0]}`,
-        `내역: ${d.details || '-'}`,
-        d.prepaid ? `REF: ${prepaidRef(d.name, d.refTpl)}` : null,
+        head,
+        ...(d.flags || []).filter((f) => /이미 장부|같은 날짜·금액|행을 수정|수정본/.test(f)).map((f) => `🚨 *${plainReason(f).replace(/ →.*$/, '')}* — 회계 담당이 확인해요`),
+        `🏪 ${d.vendor || '-'}`,
+        `📅 ${d.date || '-'}`,
+        `💰 ${moneyLine(d).split('\n')[0]}`,
+        `🛒 ${d.details || '-'}`,
+        d.prepaid ? `💳 ${prepaidRef(d.name, d.refTpl)}` : null,
+        '',
         '회계 담당 승인 후 장부에 저장돼요. 틀린 곳은 답장으로 알려 주세요.',
       ].filter((x) => x !== null).join('\n');
     }
     return [
-      `[승인 요청] ${d.id}${d.v > 1 ? ` (수정 ${d.v - 1})` : ''}`,
+      head,
       warnBlock(d),
-      `올린 사람: ${d.name}`,
-      `시트: ${sheet}${d.reason ? ` — ${plainReason(d.reason)}` : ''}`,
-      `업체: ${d.vendor || '-'}`,
-      `날짜: ${d.date || '-'}`,
-      `영수증번호: ${d.receiptNo || '-'}${d.docType === 'credit_note' ? ' (Credit Note)' : ''}`,
-      `내역: ${d.details || '-'}`,
-      d.purpose ? `목적: ${d.purpose}` : null,
-      `금액: ${moneyLine(d)}`,
-      d.prepaid ? `REF: ${prepaidRef(d.name, d.refTpl)}` : null,
+      `👤 올린 사람: ${d.name}`,
+      `🗂️ 시트: ${sheet}${d.reason ? ` — ${plainReason(d.reason)}` : ''}`,
+      `🏪 업체: ${d.vendor || '-'}`,
+      `📅 날짜: ${d.date || '-'}`,
+      `🔢 영수증번호: ${d.receiptNo || '-'}${d.docType === 'credit_note' ? ' (Credit Note)' : ''}`,
+      `🛒 내역: ${d.details || '-'}`,
+      d.purpose ? `🎯 목적: ${d.purpose}` : null,
+      `💰 금액: ${moneyLine(d)}`,
+      d.prepaid ? `💳 REF: ${prepaidRef(d.name, d.refTpl)}` : null,
       '',
       '고칠 내용은 답장으로 보내세요 (예: "분류 Drink", "총액 1200").',
     ].filter((x) => x !== null).join('\n');
@@ -308,11 +317,11 @@ export function createBot({
       const q = d.ai?.question || '영수증을 읽기 어려워요. 날짜·업체·총액을 알려 주시겠어요?';
       const missing = Array.isArray(d.ai?.missing) ? d.ai.missing : [];
       if (missing.length === 1 && missing[0] === 'date') {
-        // 날짜만 안 보이면 최근 날짜를 버튼으로 제안 (추측해서 넣지 않고 올린 사람이 고른다)
-        const days = [0, 1, 2].map((n) => ymdOffset(-n));
-        const label = (ymd, n) => `${['오늘', '어제', '그제'][n]} ${ymd.slice(5).replace('-', '/')}`;
-        await wa.sendButtons(d.phone, `${q}\n\n아래에서 고르거나, 다른 날짜면 "날짜 10/20"처럼 답장해 주세요. 그만두려면 "취소".`,
-          days.map((ymd, n) => ({ id: `date:${d.id}:${ymd}`, title: label(ymd, n) })));
+        // 날짜만 안 보이면 최근 1주일 날짜 + 취소를 목록으로 제안 (추측해서 넣지 않고 올린 사람이 고른다)
+        const names = ['오늘', '어제', '그제'];
+        const rows = [0, 1, 2, 3, 4, 5, 6].map((n) => { const ymd = ymdOffset(-n); return { id: `date:${d.id}:${ymd}`, title: `${names[n] || `${n}일 전`} ${ymd.slice(5).replace('-', '/')}` }; });
+        rows.push({ id: `cancel:${d.id}`, title: '취소', description: '이 접수를 취소해요' });
+        await wa.sendList(d.phone, `📅 ${q}\n\n아래 [날짜 고르기]에서 고르거나, 다른 날짜면 "날짜 10/20"처럼 답장해 주세요.`, '날짜 고르기', rows);
         return persist();
       }
       await wa.sendButtons(d.phone, `${q}\n(답장해 주시면 반영해서 다시 읽을게요.)`, [{ id: `cancel:${d.id}`, title: '취소' }]);
@@ -474,9 +483,11 @@ export function createBot({
     const where = `${result.tab} ${result.no} (${result.rowNumber}행)`;
     await wa.sendText(approverPhone, `${result.revised ? '기존 행을 수정했어요' : '장부에 저장했어요'}: ${where}`);
     if (d.phone !== approverPhone) {
-      await wa.sendText(d.phone, `회계 승인 완료 — ${where}${result.revised ? ' 기존 행 수정' : '에 저장'}됐어요.${d.prepaid ? `\n선지불 건이에요. 입금받으면 "${result.no} 입금완료"라고 보내 주세요.` : ''}`).catch(() => {});
+      const done = `✅ 회계 승인 완료 — ${where}${result.revised ? ' 기존 행 수정' : '에 저장'}됐어요.`;
+      if (d.prepaid) await wa.sendButtons(d.phone, `${done}\n💳 선지불 건이에요. 입금받으면 아래 버튼을 눌러 주세요.`, [{ id: `paid:${result.no}`, title: '입금완료' }]).catch(() => {});
+      else await wa.sendText(d.phone, done).catch(() => {});
     } else if (d.prepaid) {
-      await wa.sendText(d.phone, `선지불 건이에요. 입금 후 "${result.no} 입금완료"라고 보내 주세요.`);
+      await wa.sendButtons(d.phone, `💳 선지불 건이에요. 입금받으면 아래 버튼을 눌러 주세요.`, [{ id: `paid:${result.no}`, title: '입금완료' }]);
     }
   }
 
@@ -506,7 +517,11 @@ export function createBot({
   // ---------- 입금완료 (D11) ----------
   async function handlePaid(msg, who, isApprover) {
     const rows = await sheets.listLedger();
-    const { hit, open } = findPrepaidRow(rows, msg.text);
+    const found = findPrepaidRow(rows, msg.text);
+    const open = found.open;
+    // [입금완료] 버튼: 번호가 정확히 지정됨 (짧은 번호 #1도 OK). 이미 입금완료면 open에 없음
+    const hit = msg.paidNo ? open.find((r) => r.no === msg.paidNo) || null : found.hit;
+    if (msg.paidNo && !hit) return wa.sendText(msg.from, `${msg.paidNo}는 이미 입금완료로 반영됐거나 찾을 수 없어요.`);
     if (!hit) {
       const list = open.slice(-5).map((r) => `- ${r.no} / ${r.receiptNo} (${r.vendor}, HKD ${fmtMoney(r.hkd)})`).join('\n');
       await wa.sendText(msg.from, open.length
@@ -543,6 +558,7 @@ export function createBot({
   // ---------- 버튼 ----------
   async function handleReply(msg, who, isApprover) {
     const [action, id, v, extra] = String(msg.replyId).split(':');
+    if (action === 'paid') return handlePaid({ ...msg, text: `${id} 입금완료`, paidNo: id }, who, isApprover);
     if (action === 'cancel' || action === 'reg') {
       const d = drafts.get(id);
       if (!d || d.phone !== msg.from || !['asking', 'notdoc', 'pending'].includes(d.state)) return wa.sendText(msg.from, '이 건은 이미 처리됐거나 만료됐어요.');
@@ -598,8 +614,32 @@ export function createBot({
     for (const p of paids) await wa.sendButtons(phone, paidCard(p), [{ id: `pok:${p.id}`, title: '반영' }, { id: `pno:${p.id}`, title: '무시' }]);
   }
 
+  /** 사진에 '답장'으로 보낸 글 → 아직 승인 전이면 그 건 정정, 이미 저장된 패티캐쉬면 리마크 수정 */
+  async function handleContextReply(msg, t) {
+    const d = [...drafts.values()].find((x) => x.sourceMessageId === msg.contextId && x.phone === msg.from);
+    if (d) {
+      if (isCancelText(t)) { drafts.delete(d.id); media.delete(d.id); persist(); await wa.sendText(msg.from, `${d.id}를 취소했어요.`); return true; }
+      if (d.kind === 'patty' && remarkFromText(t) == null && !/^\s*(총액|금액|내용|설명)/.test(t)) { await correct(d, `리마크 ${t}`, false); return true; }
+      await correct(d, t, false); return true;
+    }
+    let saved = null;
+    try { saved = await sheets.findSavedBySource(msg.contextId); } catch (e) { log.warn?.('답장 대상 찾기 실패', e.message); }
+    if (!saved) return false;
+    if (saved.tab !== PATTY_TAB) {
+      await wa.sendText(msg.from, `${saved.tab} ${saved.no}는 이미 장부에 저장된 건이에요. 고칠 내용은 회계 담당에게 알려 주세요.`);
+      return true;
+    }
+    const remark = remarkFromText(t) ?? t;
+    const row = await sheets.updatePattyRemark(saved.no, remark);
+    if (!row) return false;
+    await sheets.appendLog({ 처리ID: saved.id, 상태: '리마크 수정', 시트: PATTY_TAB, 'No.': saved.no, 올린사람번호: msg.from, '메시지·정정': remark, 원메시지ID: msg.contextId, 처리시각: hkStamp() }).catch(() => {});
+    await wa.sendText(msg.from, `${PATTY_TAB} ${saved.no} 리마크를 바꿨어요.\n→ ${remark}`);
+    return true;
+  }
+
   async function handleText(msg, who, isApprover) {
     const t = (msg.text || '').trim();
+    if (msg.contextId && t && (await handleContextReply(msg, t))) return;
     if (/^(도움말|help|\?|사용법)$/i.test(t)) return wa.sendText(msg.from, isApprover ? `${HELP_APPROVER}\n\n${HELP_STAFF}` : HELP_STAFF);
     if (isApprover && /^(대기|목록|pending)$/i.test(t)) return resendPending(msg.from);
     if (isPaidText(t)) {
