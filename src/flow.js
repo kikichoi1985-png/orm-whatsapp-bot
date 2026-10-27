@@ -348,9 +348,11 @@ export function createBot({
     const list = apprs.length ? apprs : [d.phone]; // 승인자 미지정이면 올린 사람이 직접 승인
     const delivered = await sendCard(d, list);
     if (apprs.length && !apprs.includes(d.phone)) {
-      await wa.sendText(d.phone, delivered
+      // 직원이 잘못 보냈거나 중복이면 바로 취소할 수 있게 [취소] 버튼
+      await wa.sendButtons(d.phone, delivered
         ? body(d, false)
-        : `${body(d, false)}\n\n(회계 담당에게 바로 알리지 못했어요. 회계 담당이 비서에게 메시지를 보내면 이 건이 표시돼요.)`);
+        : `${body(d, false)}\n\n(회계 담당에게 바로 알리지 못했어요. 회계 담당이 비서에게 메시지를 보내면 이 건이 표시돼요.)`,
+      [{ id: `cancel:${d.id}`, title: '취소' }]);
     }
     persist();
   }
@@ -562,7 +564,15 @@ export function createBot({
     if (action === 'cancel' || action === 'reg') {
       const d = drafts.get(id);
       if (!d || d.phone !== msg.from || !['asking', 'notdoc', 'pending'].includes(d.state)) return wa.sendText(msg.from, '이 건은 이미 처리됐거나 만료됐어요.');
-      if (action === 'cancel') { drafts.delete(d.id); media.delete(d.id); persist(); return wa.sendText(msg.from, `${d.id}를 취소했어요.`); }
+      if (action === 'cancel') {
+        const wasPending = d.state === 'pending';
+        drafts.delete(d.id); media.delete(d.id); persist();
+        if (wasPending) { // 승인 카드가 이미 갔으면 회계 담당에게도 알림
+          const { approvers: apprs } = await people();
+          for (const a of apprs.filter((x) => x !== msg.from)) await toApprover(a, () => wa.sendText(a, `${d.id} (${d.vendor || '-'}, ${moneyLine(d).split('\n')[0]})는 올린 사람이 취소했어요. 승인하지 않아도 돼요.`)).catch(() => {});
+        }
+        return wa.sendText(msg.from, `${d.id}를 취소했어요.`);
+      }
       d.forceReceipt = true;
       return correct(d, '등록', false);
     }
