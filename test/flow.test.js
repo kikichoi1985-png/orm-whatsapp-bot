@@ -284,6 +284,29 @@ test('월말 statement만 오는 거래처 → 장부에 없는 내용이면 일
   assert.equal(row[7], 2052);
 });
 
+test('사진 한 장에 영수증 2장 → 2건으로 나눠 승인·저장 (1장 = 1행), 정정 시 해당 장만 다시 읽음', async () => {
+  const r1 = { date: '2026-07-08', vendor: 'Starbucks', receipt_no: '0101294013', currency: 'HKD', total: 42, items: [{ name: 'H.Amer', qty: '1', amount: 42, category: 'Meal' }] };
+  const r2 = { date: '2026-07-08', vendor: 'Starbucks', receipt_no: '0201679864', currency: 'HKD', total: 85, items: [{ name: 'I.Amer', qty: '1', amount: 42, category: 'Meal' }, { name: 'BerrGYog', qty: '1', amount: 43, category: 'Meal' }] };
+  const h = harness((args, n) => (n === 1 ? { readable: true, doc_type: 'receipt', ...r1, receipts: [r1, r2] } : { readable: true, doc_type: 'receipt', ...r2, date: '2026-07-09' }));
+  await h.send({ ...IMG });
+  assert.match(h.sent.filter((s) => s.to === STAFF).map((s) => s.body).join('\n'), /2건으로 나눠 접수/);
+  const cards = h.sent.filter((s) => s.to === ACCT && s.kind === 'buttons');
+  assert.equal(cards.length, 2);
+  assert.match(cards[0].body, /0101294013/); assert.match(cards[0].body, /HKD 42\.00/);
+  assert.match(cards[1].body, /0201679864/); assert.match(cards[1].body, /HKD 85\.00/);
+  assert.equal(h.calls.length, 1, '두 번째 장은 다시 읽지 않음');
+  // 두 번째 장 정정 → 그 장만 다시 읽도록 힌트 전달
+  await h.send({ text: '날짜 2026-07-09' }, ACCT);
+  assert.equal(h.calls.at(-1).part.index, 2);
+  assert.equal(h.calls.at(-1).part.receiptNo, '0201679864');
+  const latestCards = h.sent.filter((s) => s.to === ACCT && s.kind === 'buttons');
+  await h.send({ type: 'interactive', replyId: cards[0].buttons[0].id }, ACCT);
+  await h.send({ type: 'interactive', replyId: latestCards.at(-1).buttons[0].id }, ACCT);
+  const rows = h.tabs['Expenses (SG&A)'].slice(-2);
+  assert.deepEqual(rows.map((r) => [r[2], r[7]]), [['0101294013', 42], ['0201679864', 85]]);
+  assert.equal(rows[0][6], 'H.Amer x1');
+});
+
 test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
   const h = harness(() => CFF);
   await h.bot.handle({ id: 'z', from: '85299999999', name: '?', type: 'text', text: '도움말' });
