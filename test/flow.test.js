@@ -273,6 +273,17 @@ test('G10 Statement → 이미 장부에 있는 인보이스면 새 매입으로
   assert.equal(h.tabs.Purchase_Drink.length, 2);
 });
 
+test('월말 statement만 오는 거래처 → 장부에 없는 내용이면 일반 증빙처럼 1행 기장', async () => {
+  const h = harness(() => ({ readable: true, doc_type: 'statement', date: '2026-07-31', vendor: 'Classic Fine Foods', receipt_no: 'O10220_Statement 31 JUL 2026', related_no: '', total: 2052, currency: 'HKD', items: [{ name: 'Food Ingredient', category: 'Food' }] }));
+  await h.send({ ...IMG, mimeType: 'application/pdf' });
+  const card = h.lastTo(ACCT, 'buttons');
+  assert.ok(card, '회계 승인 카드가 감');
+  await h.send({ type: 'interactive', replyId: card.buttons[0].id }, ACCT);
+  const row = h.tabs.Purchase_Food.at(-1);
+  assert.equal(row[2], 'O10220_Statement 31 JUL 2026');
+  assert.equal(row[7], 2052);
+});
+
 test('등록 안 된 번호 무시, 중복 웹훅 무시, 지원 안 되는 파일 안내', async () => {
   const h = harness(() => CFF);
   await h.bot.handle({ id: 'z', from: '85299999999', name: '?', type: 'text', text: '도움말' });
