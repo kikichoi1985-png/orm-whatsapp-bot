@@ -228,7 +228,7 @@ export function createBot({
 
   const moneyLine = (d) => (d.currency === 'HKD'
     ? `HKD ${fmtMoney(d.amount)}`
-    : `${d.currency} ${fmtMoney(d.amount)} → ${d.hkd == null ? 'HKD 미정' : `HKD ${fmtMoney(d.hkd)}`}${d.rateSource ? `\n  (${d.rateSource}${d.rate && d.rate !== 1 ? `, 환율 ${round2(d.rate * 1e4) / 1e4}` : ''})` : ''}`);
+    : `${d.currency} ${fmtMoney(d.amount)} → ${d.hkd == null ? 'HKD 미정' : `HKD ${fmtMoney(d.hkd)}`}${d.rateSource ? `\n  (${d.rateSource}${d.rate && d.rate !== 1 ? `, 환율 ${Number(d.rate).toFixed(6).replace(/0+$/, '').replace(/\.$/, '')}` : ''})` : ''}`);
 
   /** 현업이 읽는 근거 문구: 개발용 결정 코드([D10-1] 등)는 빼고 보여 준다 (AI_Log에는 코드 포함 원문 보관) */
   const plainReason = (r) => String(r || '').replace(/\s*\[D\d+(?:[-·]\d+)*\]/g, '').trim();
