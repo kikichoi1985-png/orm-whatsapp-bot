@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { createBot } from '../src/flow.js';
+import { createBot, isCancelText } from '../src/flow.js';
 import { parseWebhook, verifySignature } from '../src/whatsapp.js';
 import { CATEGORIES } from '../src/rules.js';
 
@@ -243,7 +243,7 @@ test('송금 확인 화면 → 기존 장부 행 안내 → "번호 입금완료
   assert.equal(h.lastTo(ACCT), undefined);
   await h.send({ text: '등록' });
   const c = h.lastTo(ACCT, 'buttons');
-  assert.match(c.body, /같은 날짜·금액 기록이 있어요|이미 장부에/, '등록해도 중복 경고가 붙음');
+  assert.match(c.body, /날짜·금액 기록이 이미 있어요|이미 장부에/, '등록해도 중복 경고가 붙음');
 });
 
 test('G01 법카 직원식사 → 경비, 구매 목적 표시·기록 / 번호 없는 Food는 PURF 번호', async () => {
@@ -505,4 +505,9 @@ test('발송 결과 131047(24시간 창 닫힘) → 승인자가 아무 말이�
   h.bot.handleStatus({ status: 'failed', recipient_id: ACCT, errors: [{ code: 131047 }] });
   await h.send({ text: '안녕' }, ACCT);
   assert.equal(h.sent.filter((s) => s.to === ACCT && s.kind === 'buttons').length, before + 1);
+});
+
+test('취소 오타 인식: 칙쇼·취쇼·치소는 취소, 정정 문장은 아님', () => {
+  for (const t of ['취소', '칙쇼', '취쇼', '치소', '취소요', 'ㅊㅅ', 'cancel']) assert.ok(isCancelText(t), t);
+  for (const t of ['총액 1200', '청소용품', '분류 Drink', '날짜 10/20']) assert.ok(!isCancelText(t), t);
 });

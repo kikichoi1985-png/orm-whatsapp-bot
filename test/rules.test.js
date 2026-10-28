@@ -121,3 +121,20 @@ test('판독 응답 파싱: 도구 호출 / 본문 JSON', async () => {
   assert.equal(parseResult({ content: [{ type: 'text', text: '결과: {"readable":false,"items":[]}' }] }).readable, false);
   assert.throws(() => parseResult({ content: [{ type: 'text', text: '모르겠어요' }] }));
 });
+
+test('네이버 증권 JSON 환율: 결과 배열에서 날짜·종가를 읽고, 410이면 다음 출처로 넘어감', async () => {
+  const { parsePriceJson, createFx } = await import('../src/fx.js');
+  const rows = parsePriceJson({ result: [{ localTradedAt: '2026-10-24', closePrice: '193.21' }, { localTradedAt: '2026-10-23', closePrice: '192.80' }] });
+  assert.deepEqual(rows[0], { date: '2026-10-24', rate: 193.21 });
+  const data = { CNY: [{ localTradedAt: '2026-10-24', closePrice: '193.21' }], HKD: [{ localTradedAt: '2026-10-24', closePrice: '176.50' }] };
+  const fetchImpl = async (url) => {
+    if (url.includes('finance.naver.com')) return { ok: false, status: 410 };
+    if (url.includes('api.stock.naver.com')) return { ok: false, status: 503 };
+    const code = url.includes('FX_CNY') ? 'CNY' : 'HKD';
+    return { ok: true, json: async () => (url.includes('page=1') ? data[code] : []) };
+  };
+  const r = await createFx({ fetchImpl, log: {} }).cnyToHkd('2026-10-25');
+  assert.equal(r.basisDate, '2026-10-24');
+  assert.ok(Math.abs(r.rate - 193.21 / 176.5) < 1e-9);
+  assert.match(r.source, /네이버 증권 모바일/);
+});
