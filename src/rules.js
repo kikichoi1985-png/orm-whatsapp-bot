@@ -196,7 +196,9 @@ export function findDuplicate(rows, cand) {
       const same = round2(hit.amount) === amt && (!date || Number(hit.date) === date);
       return { kind: same ? 'duplicate' : 'revision', row: hit };
     }
-    return null;
+    // 번호가 달라도 같은 업체·같은 날짜·같은 금액이면 의심 (기존 행이 내부 번호로 저장된 경우 등)
+    const twin = rows.find((r) => round2(r.amount) === amt && sameVendor(r) && date && Number(r.date) === date);
+    return twin ? { kind: 'possible_duplicate', row: twin } : null;
   }
   const hit = rows.find((r) => round2(r.amount) === amt && sameVendor(r) && withinDays(r.date, date, 7));
   return hit ? { kind: 'possible_duplicate', row: hit } : null;

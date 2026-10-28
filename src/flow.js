@@ -11,7 +11,15 @@ import { SUPPORTED_MIME } from './extract.js';
 /** 홍콩 기준 오늘 ± n일 → YYYY-MM-DD */
 const ymdOffset = (n) => new Date(Date.now() + 8 * 3600e3 + n * 864e5).toISOString().slice(0, 10);
 /** '취소' 판단: 띄어쓰기·문장부호·흔한 오타 허용 (취쇼, 취소요, 취소해 줘, cancel, 그만) */
-export const isCancelText = (t) => { const n = String(t || '').replace(/[\s.!?~ㅠㅜ]/g, '').toLowerCase(); return n.length <= 7 && /^(취[소쇼]|츼소|취서|cancel|그만)/.test(n); };
+/** 한글 음절의 초성 번호 (ㄱ=0 … ㅊ=14, ㅅ=9, ㅆ=10), 한글이 아니면 -1 */
+const choseong = (ch) => { const c = ch.charCodeAt(0) - 0xac00; return c >= 0 && c < 11172 ? Math.floor(c / 588) : -1; };
+/** '취소'와 그 오타: 취쇼·칙쇼·치소·츄소처럼 ㅊ+ㅅ(ㅆ)로 시작하는 두 글자, ㅊㅅ, cancel, 그만 */
+export const isCancelText = (t) => {
+  const n = String(t || '').replace(/[\s.!?~ㅠㅜ]/g, '').toLowerCase().replace(/(요|해|해줘|해주세요|할게요|할게)$/, '');
+  if (n.length > 7) return false;
+  if (/^(취[소쇼]|츼소|취서|ㅊㅅ|cancel|그만)/.test(n)) return true;
+  return n.length === 2 && choseong(n[0]) === 14 && [9, 10].includes(choseong(n[1]));
+};
 const UNSUPPORTED_TEXT = '사진, PDF, 글자 메시지만 처리할 수 있어요. 음성 메시지는 아직 지원하지 않아요.';
 const TTL = { asking: 3 * 864e5, notdoc: 3 * 864e5, pending: 14 * 864e5 };
 const CAT_WORDS = [
@@ -179,7 +187,7 @@ export function createBot({
       d.hkd == null ? 'HKD 금액을 정할 수 없음 — 답장으로 "HKD 금액"을 알려 주세요' : null,
       fxr.warn ? fxr.source : null,
       d.dup?.kind === 'duplicate' ? `이미 장부에 있는 증빙 같아요: ${d.dup.row.tab} ${d.dup.row.no}${d.dup.creditNoted ? ` (Credit Note ${fmtMoney(d.dup.creditNoted)} 차감 반영된 건)` : ''}` : null,
-      d.dup?.kind === 'possible_duplicate' ? `번호 없는 증빙 — 같은 날짜·금액 기록이 있어요: ${d.dup.row.tab} ${d.dup.row.no}` : null,
+      d.dup?.kind === 'possible_duplicate' ? `같은 업체·날짜·금액 기록이 이미 있어요: ${d.dup.row.tab} ${d.dup.row.no}` : null,
       d.dup?.kind === 'revision' ? `같은 번호의 기존 기록이 있어요(수정본) → 승인하면 ${d.dup.row.tab} ${d.dup.row.no} 행을 수정해요` : null,
       d.dup?.kind === 'credit_note' && d.dup.row ? `Credit Note → 승인하면 원본 ${d.dup.row.tab} ${d.dup.row.no} 행 금액을 차감해 수정해요` : null,
       d.dup?.kind === 'credit_note' && !d.dup.row ? `Credit Note인데 원본 인보이스(${d.relatedNo || '번호 없음'})를 장부에서 못 찾았어요` : null,
@@ -228,7 +236,7 @@ export function createBot({
   /** 승인 카드 맨 위 경고: WhatsApp은 색을 못 쓰므로 이모지 + *굵게* 로 눈에 띄게 */
   function warnBlock(d) {
     if (!d.flags?.length) return null;
-    const strong = (f) => /HKD 금액을 정할 수 없음|이미 장부|같은 날짜·금액|중복|금액이 달라요|행을 수정|수정본|차감|원본 인보이스/.test(f);
+    const strong = (f) => /HKD 금액을 정할 수 없음|이미 장부|날짜·금액|중복|금액이 달라요|행을 수정|수정본|차감|원본 인보이스/.test(f);
     const lines = d.flags.map((f) => (strong(f) ? `🚨 *${plainReason(f)}*` : `ℹ️ ${plainReason(f)}`));
     return `\n${lines.join('\n')}\n`;
   }
@@ -255,7 +263,7 @@ export function createBot({
       // 직원용: 무엇이 접수됐는지만 짧게, 항목마다 아이콘
       return [
         head,
-        ...(d.flags || []).filter((f) => /이미 장부|같은 날짜·금액|행을 수정|수정본/.test(f)).map((f) => `🚨 *${plainReason(f).replace(/ →.*$/, '')}* — 회계 담당이 확인해요`),
+        ...(d.flags || []).filter((f) => /이미 장부|날짜·금액|행을 수정|수정본/.test(f)).map((f) => `🚨 *${plainReason(f).replace(/ →.*$/, '')}* — 회계 담당이 확인해요`),
         `🏪 ${d.vendor || '-'}`,
         `📅 ${d.date || '-'}`,
         `💰 ${moneyLine(d).split('\n')[0]}`,
@@ -464,8 +472,8 @@ export function createBot({
 
     if (result.blocked) {
       d.dup = result.blocked;
-      const f = `${result.blocked.kind === 'duplicate' ? '이미 장부에 있는 증빙 같아요' : '번호 없는 증빙 — 같은 날짜·금액 기록이 있어요'}: ${result.blocked.row.tab} ${result.blocked.row.no}`;
-      d.flags = [f, ...(d.flags || []).filter((x) => !/이미 장부|같은 날짜·금액/.test(x))];
+      const f = `${result.blocked.kind === 'duplicate' ? '이미 장부에 있는 증빙 같아요' : '같은 업체·날짜·금액 기록이 이미 있어요'}: ${result.blocked.row.tab} ${result.blocked.row.no}`;
+      d.flags = [f, ...(d.flags || []).filter((x) => !/이미 장부|날짜·금액/.test(x))];
       await wa.sendText(approverPhone, `${d.id}: 저장 직전에 확인해 보니 같은 증빙이 방금 저장됐어요(${result.blocked.row.tab} ${result.blocked.row.no}). 저장하지 않았어요. 새 카드를 확인해 주세요.`);
       d.v = (d.v || 0) + 1;
       await sendCard(d, [approverPhone]);
