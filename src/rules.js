@@ -236,3 +236,35 @@ export const hkYear = () => hkNow().getUTCFullYear();
 export const hkDateNumber = (ms) => Number(new Date(Number(ms) + 8 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, ''));
 export const fmtYmd = (n) => String(n).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3');
 export const hkStamp = () => hkNow().toISOString().slice(0, 16).replace('T', ' ');
+
+/** 드라이브 파일 약어 (오름 영수증 폴더 관행) */
+export const DRIVE_PREFIX = { Expenses: 'EXP', Purchase_Food: 'PURF', Purchase_Drink: 'PURD' };
+
+/** 장부 C열 영수증번호: 실제 장부처럼 앞에 '#' (내부 번호 Basic_… / YYYY PURF (…)는 그대로) */
+export function ledgerReceiptNo(receiptNo) {
+  const s = String(receiptNo || '').trim();
+  if (!s) return '';
+  return s.startsWith('#') ? s : `#${s}`;
+}
+
+/** 파일명에 쓸 수 없는 문자 정리 + 긴 내역은 단어 단위로 잘라 'Etc' */
+const cleanName = (s) => String(s || '').replace(/[\\/:*?"<>|\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+export function shortDesc(desc, max = 60) {
+  const s = cleanName(desc);
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max).replace(/[\s,;/&-]+\S*$/, '').replace(/[\s,;/&-]+$/, '');
+  return `${cut || s.slice(0, max)} Etc`;
+}
+
+/**
+ * 드라이브 파일명: "2026 EXP (20260456) North Garden Restaurant - Lunch for Baekkyung Winery #INV123"
+ * no: 장부 No.(#20260456 / #334), receiptNo: 영수증 원래 번호(없으면 생략)
+ */
+export function driveFileName({ year, category, no, vendor, desc, receiptNo = '', creditNote = false }) {
+  const n = String(no || '').replace(/^#/, '');
+  const rn = cleanName(receiptNo).replace(/^#/, '');
+  const parts = [`${year} ${DRIVE_PREFIX[category] || 'EXP'} (${n}) ${cleanName(vendor) || 'Unknown'} - ${shortDesc(desc) || 'Receipt'}`];
+  if (creditNote) parts.push('Credit Note');
+  if (rn) parts.push(`#${rn}`);
+  return parts.join(' ').slice(0, 180);
+}

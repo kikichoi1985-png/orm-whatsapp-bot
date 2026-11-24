@@ -2,6 +2,7 @@ import express from 'express';
 import { createWhatsApp, verifySignature, parseWebhook } from './whatsapp.js';
 import { createExtractor } from './extract.js';
 import { createSheetsStore } from './sheets.js';
+import { createDriveStore, createScriptDriveStore } from './drive.js';
 import { createFx } from './fx.js';
 import { createBot } from './flow.js';
 
@@ -25,8 +26,18 @@ let bot = null;
 if (!missing.length && sheets) {
   const wa = createWhatsApp({ token: env.WHATSAPP_TOKEN, phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID, version: env.GRAPH_API_VERSION || 'v25.0' });
   const extract = createExtractor({ apiKey: env.ANTHROPIC_API_KEY, model: env.CLAUDE_MODEL || 'claude-sonnet-5-5' });
+  // 승인된 원본 저장 폴더(공유 드라이브). 셋 중 설정된 폴더만 저장
+  const folders = { Expenses: env.DRIVE_FOLDER_EXP, Purchase_Food: env.DRIVE_FOLDER_PURF, Purchase_Drink: env.DRIVE_FOLDER_PURD };
+  let drive = null;
+  if (Object.values(folders).some(Boolean)) {
+    try {
+      drive = env.DRIVE_SCRIPT_URL
+        ? createScriptDriveStore({ url: env.DRIVE_SCRIPT_URL, secret: env.DRIVE_SCRIPT_SECRET || '', folders }) // 내 드라이브 폴더 (Apps Script)
+        : createDriveStore({ serviceAccountJson: env.GOOGLE_SERVICE_ACCOUNT_JSON, folders });                 // 공유 드라이브 폴더
+    } catch (e) { console.error('드라이브 설정 실패', e.message); }
+  } else console.warn('DRIVE_FOLDER_* 미설정 — 영수증 원본을 드라이브에 저장하지 않아요.');
   bot = createBot({
-    wa, extract, sheets, fx: createFx(),
+    wa, extract, sheets, fx: createFx(), drive,
     allowed: list(env.ALLOWED_NUMBERS),
     approvers: list(env.APPROVER_NUMBERS),
     approvalTemplate: env.APPROVAL_TEMPLATE || '',

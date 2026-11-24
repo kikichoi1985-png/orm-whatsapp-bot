@@ -5,6 +5,7 @@ import {
   CATEGORIES, classify, toHKD, isPrepaidText, isPaidText, prepaidRef, paidRef, prepaidNameFromRef, findPrepaidRow,
   detailsText, fmtMoney, round2, ymdNumber, nextNo, fallbackReceiptNo, findDuplicate, findPaidRow, normalizeNo, sameDocNo, hkdOverride,
   hkYear, hkStamp, hkDateNumber, fmtYmd, DEFAULT_REF, PATTY_TAB, PATTY_DEFAULT_DESC, remarkFromText,
+  ledgerReceiptNo, driveFileName,
 } from './rules.js';
 import { SUPPORTED_MIME } from './extract.js';
 
@@ -42,7 +43,7 @@ const HELP_APPROVER = [
 ].join('\n');
 
 export function createBot({
-  wa, extract, sheets, fx = null, allowed = [], approvers = [], approvalTemplate = '', templateLang = 'ko',
+  wa, extract, sheets, fx = null, drive = null, allowed = [], approvers = [], approvalTemplate = '', templateLang = 'ko',
   log = console, persistDelayMs = 1500, batchMs = 0,
 }) {
   const drafts = new Map();     // id -> draft
@@ -50,6 +51,11 @@ export function createBot({
   const focus = new Map();      // 승인자 phone -> 마지막으로 본 draftId
   const paidReqs = new Map();   // id -> 입금완료 확인 요청
   const media = new Map();      // draftId -> {base64, mimeType} (메모리만)
+  // 장부에는 영어 업체명·짧은 영어 내역(실제 장부 관행), 원문은 카드·AI_Log에
+  const ledgerVendor = (d) => d.vendorEn || d.vendor;
+  const ledgerDesc = (d) => d.descEn || d.details;
+  // 실제 장부는 영어 업체명 → 원문·영어 이름 둘 다로 중복 확인
+  const dupOf = (rows, d) => findDuplicate(rows, d) || (d.vendorEn && d.vendorEn !== d.vendor ? findDuplicate(rows, { ...d, vendor: d.vendorEn }) : null);
   const seen = new Map();
   const queues = new Map();
   const prepaidHint = new Map();
@@ -155,7 +161,7 @@ export function createBot({
     d.kind = undefined;
     const items = Array.isArray(out.items) ? out.items : [];
     Object.assign(d, {
-      date: out.date || '', vendor: out.vendor || '', receiptNo: String(out.receipt_no || '').replace(/^["'\s]+|["'\s]+$/g, ''), relatedNo: out.related_no || '',
+      date: out.date || '', vendor: out.vendor || '', vendorEn: String(out.vendor_en || '').trim(), descEn: String(out.description_en || '').trim(), receiptNo: String(out.receipt_no || '').replace(/^["'\s]+|["'\s]+$/g, ''), relatedNo: out.related_no || '',
       items, details: detailsText(items), currency: String(out.currency || 'HKD').trim().toUpperCase(),
       amount: Number(out.total) || 0, notes: out.notes || '', purpose: out.purpose || '',
     });
@@ -173,7 +179,7 @@ export function createBot({
         const orig = d.relatedNo && rows.find((r) => sameDocNo(r.receiptNo, d.relatedNo));
         d.dup = orig ? { kind: 'credit_note', row: orig } : { kind: 'credit_note', row: null };
       } else {
-        d.dup = findDuplicate(rows, d);
+        d.dup = dupOf(rows, d);
         // 같은 번호인데 금액만 다른 '수정본'처럼 보여도, 그 차이가 이미 반영된 Credit Note 차감 때문이면 같은 인보이스 재전송(중복)
         if (d.dup?.kind === 'revision') {
           const cn = [...String(d.dup.row.details || '').matchAll(/Credit Note[^/]*?-\s*([\d,]+(?:\.\d+)?)/gi)].reduce((a, m) => a + Number(m[1].replace(/,/g, '')), 0);
@@ -278,10 +284,11 @@ export function createBot({
       warnBlock(d),
       `👤 올린 사람: ${d.name}`,
       `🗂️ 시트: ${sheet}${d.reason ? ` — ${plainReason(d.reason)}` : ''}`,
-      `🏪 업체: ${d.vendor || '-'}`,
+      `🏪 업체: ${d.vendorEn && d.vendorEn !== d.vendor ? `${d.vendorEn} (${d.vendor || '-'})` : (d.vendor || '-')}`,
       `📅 날짜: ${d.date || '-'}`,
       `🔢 영수증번호: ${d.receiptNo || '-'}${d.docType === 'credit_note' ? ' (Credit Note)' : ''}`,
       `🛒 내역: ${d.details || '-'}`,
+      d.descEn ? `📝 장부 내역: ${d.descEn}` : null,
       d.purpose ? `🎯 목적: ${d.purpose}` : null,
       `💰 금액: ${moneyLine(d)}`,
       d.prepaid ? `💳 REF: ${prepaidRef(d.name, d.refTpl)}` : null,
@@ -452,20 +459,20 @@ export function createBot({
           const hkd = round2(Number(fresh.hkd) - d.hkd);
           vals = [fresh.file, fresh.receiptNo, fresh.date, fresh.vendor, fresh.currency, `${fresh.details} / Credit Note ${d.receiptNo || ''} -${fmtMoney(d.amount)}`.trim(), amt, hkd, fresh.payDate, fresh.account, fresh.ref];
         } else {
-          vals = [fresh.file || fileLabel, d.receiptNo, ymdNumber(d.date), d.vendor, d.currency, d.details, d.amount, d.hkd, fresh.payDate, fresh.account, ref || fresh.ref];
+          vals = [fresh.file || fileLabel, ledgerReceiptNo(d.receiptNo) || fresh.receiptNo, ymdNumber(d.date), ledgerVendor(d), d.currency, ledgerDesc(d), d.amount, d.hkd, fresh.payDate, fresh.account, ref || fresh.ref];
         }
         await sheets.updateLedgerRow(fresh.tab, fresh.rowNumber, vals);
-        return { tab: fresh.tab, no: fresh.no, rowNumber: fresh.rowNumber, revised: true };
+        return { tab: fresh.tab, no: fresh.no, rowNumber: fresh.rowNumber, revised: true, vendor: fresh.vendor };
       }
       // 저장 직전 재확인: 카드를 만든 뒤 같은 증빙이 먼저 저장됐을 수 있다(연달아 두 번 보낸 경우)
       if (d.docType !== 'credit_note') {
-        const late = findDuplicate(await sheets.listLedger(), d);
+        const late = dupOf(await sheets.listLedger(), d);
         const known = d.dup?.row && late?.row && d.dup.row.tab === late.row.tab && d.dup.row.no === late.row.no;
         if (late && ['duplicate', 'possible_duplicate'].includes(late.kind) && !known) return { blocked: late };
       }
       const tab = CATEGORIES[d.category];
       const no = nextNo(d.category, await sheets.columnA(tab), year);
-      const row = [no, fileLabel, d.receiptNo || fallbackReceiptNo(no, d.category, year), ymdNumber(d.date), d.vendor, d.currency, d.details, d.amount, d.hkd, '', '', ref];
+      const row = [no, fileLabel, ledgerReceiptNo(d.receiptNo) || fallbackReceiptNo(no, d.category, year), ymdNumber(d.date), ledgerVendor(d), d.currency, ledgerDesc(d), d.amount, d.hkd, '', '', ref];
       const rowNumber = await sheets.insertLedgerRow(tab, row);
       return { tab, no, rowNumber, revised: false };
     });
@@ -488,10 +495,27 @@ export function createBot({
       'AI 원본': d.ai, AI대비수정: changed.join(', ') || '없음', '환율 근거': d.rateSource, '구매 목적': d.purpose, 생성시각: new Date(d.createdAt + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' '), 처리시각: hkStamp(),
     }).catch((e) => log.warn?.('AI_Log 기록 실패', e.message));
 
+    // 승인된 원본을 드라이브(장부 탭별 폴더)에 저장 — 실패해도 장부 저장은 유지하고 승인자에게 알림
+    let driveLine = '';
+    const cat = Object.keys(CATEGORIES).find((k) => CATEGORIES[k] === result.tab);
+    if (drive?.hasFolder?.(cat)) {
+      const name = driveFileName({
+        year, category: cat, no: result.no, vendor: d.vendorEn || result.vendor || d.vendor, desc: ledgerDesc(d),
+        receiptNo: d.receiptNo, creditNote: d.docType === 'credit_note',
+      });
+      try {
+        const up = await drive.upload(cat, name, [].concat(await getMedia(d)));
+        if (up) driveLine = `\n📁 드라이브: ${up.name}${up.count > 1 ? ` (사진 ${up.count}장, 폴더)` : ''}`;
+      } catch (e) {
+        log.warn?.('드라이브 저장 실패', e.message);
+        driveLine = `\n⚠️ 드라이브 저장 실패 — 파일은 직접 올려 주세요 (파일명: ${name})`;
+      }
+    }
+
     drafts.delete(d.id); media.delete(d.id);
     persist();
     const where = `${result.tab} ${result.no} (${result.rowNumber}행)`;
-    await wa.sendText(approverPhone, `${result.revised ? '기존 행을 수정했어요' : '장부에 저장했어요'}: ${where}`);
+    await wa.sendText(approverPhone, `${result.revised ? '기존 행을 수정했어요' : '장부에 저장했어요'}: ${where}${driveLine}`);
     if (d.phone !== approverPhone) {
       const done = `✅ 회계 승인 완료 — ${where}${result.revised ? ' 기존 행 수정' : '에 저장'}됐어요.`;
       if (d.prepaid) await wa.sendButtons(d.phone, `${done}\n💳 선지불 건이에요. 입금받으면 아래 버튼을 눌러 주세요.`, [{ id: `paid:${result.no}`, title: '입금완료' }]).catch(() => {});

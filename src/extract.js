@@ -16,6 +16,8 @@ const TOOL = {
       purpose: { type: 'string', description: '구매 목적·용도 (메시지에 있으면 그대로 짧게, 예: Staff meal, Team Building). 없으면 빈 문자열 — 추측 금지' },
       date: { type: 'string', description: 'YYYY-MM-DD' },
       vendor: { type: 'string' },
+      vendor_en: { type: 'string', description: '업체명 영어 표기. 영수증에 영어 이름이 있으면 그대로, 없으면 영어로 번역(예: 北園 → North Garden Restaurant). 한자·한글 금지' },
+      description_en: { type: 'string', description: '장부 상세내역(Description)용 짧은 영어 요약 2~6단어, 첫 글자 대문자(예: Food Ingredient, Wine Mixed, Dim Sum Lunch, Kitchen Turner, Dishwasher Rental). 목적이 메시지·답변에 있으면 반영(예: Lunch for Baekkyung Winery)' },
       receipt_no: { type: 'string', description: '영수증/인보이스 번호, 없으면 빈 문자열' },
       currency: { type: 'string', description: 'ISO 코드. ¥/元/RMB=CNY, 홍콩 영수증의 $/HK$=HKD' },
       total: { type: 'number', description: '최종 결제 총액' },
@@ -41,7 +43,7 @@ const TOOL = {
         items: {
           type: 'object',
           properties: {
-            doc_type: { type: 'string' }, date: { type: 'string' }, vendor: { type: 'string' }, receipt_no: { type: 'string' },
+            doc_type: { type: 'string' }, date: { type: 'string' }, vendor: { type: 'string' }, vendor_en: { type: 'string' }, description_en: { type: 'string' }, receipt_no: { type: 'string' },
             currency: { type: 'string' }, total: { type: 'number' }, payment_method: { type: 'string' }, purpose: { type: 'string' },
             items: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, qty: { type: 'string' }, amount: { type: 'number' }, category: { type: 'string', enum: ['Food', 'Drink', 'Meal', 'Other', 'Unclear'] } }, required: ['name', 'category'] } },
             notes: { type: 'string' },
@@ -67,6 +69,8 @@ export function buildPrompt({ sender, message, answers = [], vendors = [], today
   예: 스타벅스 커피·식당 점심·바 계산서·Keeta 배달 = Meal / 치즈·생선·과일을 마켓에서 구매 = Food / 와인 도매 구매 = Drink.
   품목이 없는 카드 전표·결제 문자라도 가게 이름이 식당·카페·바면 Meal로 둔다. 이때 items는 'Food & Beverage (카드 전표, 품목 없음)' 한 줄로 쓰고, 'Mastercard Sale'·'Sale'·'Payment' 같은 결제 문구를 품목으로 쓰지 않는다.
 - 영수증이 아니거나 날짜·거래처·총액 중 하나라도 읽을 수 없으면 readable=false로 하고 missing에 빠진 값을 적고, question에는 그 빠진 값만 묻는다. 품목이 영수증에 보이면 품목·용도(구매 목적)는 묻지 않는다 — 용도는 선택 정보다. 읽은 값(거래처·총액·품목 등)은 readable=false여도 해당 칸에 채워 둔다. 올린 사람의 추가 답변·정정이 있으면 반드시 그대로 반영한다(답변이 우선).
+- vendor는 영수증 표기 그대로, vendor_en은 영어 표기(영수증의 영어 상호 우선, 없으면 번역·로마자). 알려진 거래처 목록에 같은 곳이 있으면 그 이름을 vendor_en으로 쓴다.
+- description_en은 회계 장부에 들어갈 짧은 영어 요약이다(품목 나열 금지, 2~6단어). 식재료 매입은 'Food Ingredient', 주류·음료 매입은 'Wine Mixed'·'Beer Kegs'처럼 종류, 식사·회식은 'Dim Sum Lunch'·'Staff Dinner', 비품은 물건 이름(예: 'Kitchen Turner'). 메시지·답변에 목적이나 내역 문구가 있으면 그것을 영어로 반영한다(예: "백경와이너리 점심" → 'Lunch for Baekkyung Winery'). 올린 사람이 내역을 직접 지정하면 그대로 쓴다.
 - 연도가 없으면 오늘(${today}) 기준으로 가장 최근 날짜로 본다.
 - 월별 거래명세서(Statement)는 doc_type=statement. total은 그 기간에 새로 생긴 구매액(Current Month·당월 인보이스 합계)이고, 이월 잔액(B/F·Opening)·최종 잔액(Balance)·입금액은 넣지 않는다. date는 기간 마지막 날. receipt_no는 statement 번호가 있으면 그 번호, 없으면 '<거래처 짧은 이름> YYYY-MM Statement'. items는 'YYYY-MM Statement (인보이스 N건)' 한 줄(category Unclear)로 하고, 인보이스 번호들은 related_no에 쉼표로 적는다.
 - Credit Note는 doc_type=credit_note, total은 차감 금액(양수), related_no에 원래 인보이스 번호.
