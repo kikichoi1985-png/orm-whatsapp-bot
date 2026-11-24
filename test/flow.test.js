@@ -9,7 +9,7 @@ import { CATEGORIES } from '../src/rules.js';
 const STAFF = '85291110000';   // 한상훈 매니져님 (직원)
 const ACCT = '85292220000';    // 고성찬 (회계)
 
-function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, ledgerSeed = {}, batchMs = 0 } = {}) {
+function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, ledgerSeed = {}, batchMs = 0, drive = null } = {}) {
   const sent = [];
   const tabs = Object.fromEntries(Object.values(CATEGORIES).map((t) => [t, [['No.'], ...(ledgerSeed[t] || [])]]));
   const log = [];
@@ -49,7 +49,7 @@ function harness(extractImpl, { approvers = true, fxImpl, failWindow = false, le
   const fx = { cnyToHkd: fxImpl || (async () => ({ rate: 1.10238, source: '네이버 매매기준율 테스트' })) };
   const calls = [];
   const extract = async (args) => { calls.push(args); return extractImpl(args, calls.length); };
-  const bot = createBot({ wa, extract, sheets, fx, approvalTemplate: 'approval_ping', log: { warn() {}, error() {} }, batchMs });
+  const bot = createBot({ wa, extract, sheets, fx, drive, approvalTemplate: 'approval_ping', log: { warn() {}, error() {} }, batchMs });
   let n = 0;
   const send = (m, from = STAFF) => bot.handle({ id: 'm' + (++n), from, name: 'wa-profile', type: 'text', ...m });
   const lastTo = (to, kind) => sent.filter((s) => s.to === to && (!kind || s.kind === kind)).at(-1);
@@ -86,7 +86,7 @@ test('직원 영수증(선지불) → 회계 승인 → 장부 저장 → 입금
   const row = h.tabs.Purchase_Food.at(-1);
   assert.equal(row[0], '#293', 'D07 기존 마지막 번호 다음');
   assert.equal(row[1], `오름 ${new Date().getFullYear()} 매입 인보이스 모음`);
-  assert.deepEqual(row.slice(2, 9), ['INV-208431', 20261020, 'CLASSIC FINE FOODS (HK) LTD', 'HKD', 'Unsalted Butter 1kg x2, Whipping Cream x3, San Pellegrino x24', 1075, 1075]);
+  assert.deepEqual(row.slice(2, 9), ['#INV-208431', 20261020, 'CLASSIC FINE FOODS (HK) LTD', 'HKD', 'Unsalted Butter 1kg x2, Whipping Cream x3, San Pellegrino x24', 1075, 1075]);
   assert.equal(row[11], '한상훈 매니져님 선지불, 추후 입금 해야함');
   assert.match(h.lastTo(STAFF).body, /회계 승인 완료 — Purchase_Food #293/);
   assert.equal(h.log.at(-1).상태, '저장');
@@ -283,7 +283,7 @@ test('월말 statement만 오는 거래처 → 장부에 없는 내용이면 일
   assert.ok(card, '회계 승인 카드가 감');
   await h.send({ type: 'interactive', replyId: card.buttons[0].id }, ACCT);
   const row = h.tabs.Purchase_Food.at(-1);
-  assert.equal(row[2], 'O10220_Statement 31 JUL 2026');
+  assert.equal(row[2], '#O10220_Statement 31 JUL 2026');
   assert.equal(row[7], 2052);
 });
 
@@ -306,7 +306,7 @@ test('사진 한 장에 영수증 2장 → 2건으로 나눠 승인·저장 (1�
   await h.send({ type: 'interactive', replyId: cards[0].buttons[0].id }, ACCT);
   await h.send({ type: 'interactive', replyId: latestCards.at(-1).buttons[0].id }, ACCT);
   const rows = h.tabs['Expenses (SG&A)'].slice(-2);
-  assert.deepEqual(rows.map((r) => [r[2], r[7]]), [['0101294013', 42], ['0201679864', 85]]);
+  assert.deepEqual(rows.map((r) => [r[2], r[7]]), [['#0101294013', 42], ['#0201679864', 85]]);
   assert.equal(rows[0][6], 'H.Amer x1');
 });
 
@@ -510,4 +510,45 @@ test('발송 결과 131047(24시간 창 닫힘) → 승인자가 아무 말이�
 test('취소 오타 인식: 칙쇼·취쇼·치소는 취소, 정정 문장은 아님', () => {
   for (const t of ['취소', '칙쇼', '취쇼', '치소', '취소요', 'ㅊㅅ', 'cancel']) assert.ok(isCancelText(t), t);
   for (const t of ['총액 1200', '청소용품', '분류 Drink', '날짜 10/20']) assert.ok(!isCancelText(t), t);
+});
+
+test('영어 업체명·내역으로 장부 기록, 승인 후 드라이브에 규칙대로 저장', async () => {
+  const up = [];
+  const drive = { hasFolder: (c) => c === 'Expenses', upload: async (c, name, files) => { up.push({ c, name, n: files.length }); return { name: `${name}.jpeg`, count: files.length }; } };
+  const NG = { readable: true, doc_type: 'receipt', date: '2026-11-24', vendor: '北園 (上環)', vendor_en: 'North Garden Restaurant', description_en: 'Lunch for Baekkyung Winery', receipt_no: '', currency: 'HKD', total: 664, items: [{ name: '蝦餃皇', qty: '1', amount: 60, category: 'Meal' }] };
+  const h = harness(() => NG, { drive, ledgerSeed: { 'Expenses (SG&A)': [['#20260472', 'x', '#20261031', 20261031, 'Champion Group', 'HKD', 'Dishwasher Rental', 2800, 2800, '', '', '']] } });
+  await h.send({ ...IMG });
+  const card = h.lastTo(ACCT, 'buttons');
+  assert.match(card.body, /업체: North Garden Restaurant \(北園 \(上環\)\)/);
+  assert.match(card.body, /장부 내역: Lunch for Baekkyung Winery/);
+  await h.send({ type: 'interactive', replyId: card.buttons[0].id }, ACCT);
+  const row = h.tabs['Expenses (SG&A)'].at(-1);
+  const y = new Date().getFullYear();
+  assert.equal(row[0], `#${y}0001`.startsWith('#2026') ? '#20260473' : row[0]);
+  assert.deepEqual([row[2], row[4], row[6]], [`Basic_${String(row[0]).slice(1)}`, 'North Garden Restaurant', 'Lunch for Baekkyung Winery']);
+  assert.equal(up.length, 1);
+  assert.equal(up[0].name, `${y} EXP (${String(row[0]).slice(1)}) North Garden Restaurant - Lunch for Baekkyung Winery`);
+  assert.match(h.lastTo(ACCT).body, /📁 드라이브: .*Lunch for Baekkyung Winery\.jpeg/);
+});
+
+test('드라이브 저장 실패해도 장부는 저장, 승인자에게 직접 올릴 파일명 안내', async () => {
+  const drive = { hasFolder: () => true, upload: async () => { throw new Error('403'); } };
+  const h = harness(() => CFF, { drive });
+  await h.send({ ...IMG });
+  await h.send({ type: 'interactive', replyId: h.lastTo(ACCT, 'buttons').buttons[0].id }, ACCT);
+  assert.equal(h.tabs.Purchase_Food.length, 2);
+  assert.match(h.lastTo(ACCT).body, /드라이브 저장 실패 — 파일은 직접 올려 주세요 \(파일명: \d{4} PURF \(1\) CLASSIC FINE FOODS \(HK\) LTD - Unsalted Butter/);
+});
+
+test('Apps Script 드라이브: 비밀값·폴더·파일을 보내고 응답의 파일명을 돌려준다', async () => {
+  const { createScriptDriveStore } = await import('../src/drive.js');
+  let got;
+  const fetchImpl = async (url, opt) => { got = { url, body: JSON.parse(opt.body) }; return { status: 200, text: async () => JSON.stringify({ ok: true, id: 'F1', name: `${got.body.name}.jpeg`, url: 'u' }) }; };
+  const d = createScriptDriveStore({ url: 'https://script/exec', secret: 's3', folders: { Expenses: 'EXPDIR' }, fetchImpl });
+  assert.equal(d.hasFolder('Purchase_Food'), false);
+  const r = await d.upload('Expenses', '2026 EXP (20260473) North Garden Restaurant - Dim Sum Lunch', [{ base64: 'AAAA', mimeType: 'image/jpeg' }]);
+  assert.deepEqual([got.body.secret, got.body.folderId, got.body.files[0].ext], ['s3', 'EXPDIR', 'jpeg']);
+  assert.equal(r.name, '2026 EXP (20260473) North Garden Restaurant - Dim Sum Lunch.jpeg');
+  const bad = createScriptDriveStore({ url: 'x', secret: 'no', folders: { Expenses: 'E' }, fetchImpl: async () => ({ status: 200, text: async () => '{"ok":false,"error":"unauthorized"}' }) });
+  await assert.rejects(() => bad.upload('Expenses', 'n', [{ base64: 'A', mimeType: 'image/png' }]), /unauthorized/);
 });
